@@ -51,11 +51,13 @@ impl Runtime {
     pub fn fingerprint(&self) -> String {
         if let Some(e) = &self.settings.external {
             format!(
-                "external:{}:{}:embeddinggemma2-768-v1-readers1",
-                e.url, e.model
+                "external:{}:{}:embeddinggemma2-768-v1-{}",
+                e.url,
+                e.model,
+                crate::extract::READER_VERSION
             )
         } else {
-            model::PIPELINE.into()
+            format!("{}-{}", model::PIPELINE, crate::extract::READER_VERSION)
         }
     }
     pub fn validate(&mut self) -> Result<()> {

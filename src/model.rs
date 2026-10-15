@@ -9,7 +9,7 @@ use std::{
 };
 
 pub const REVISION: &str = "bfcd298762cc34d0357ece5ebdd31791a3a374d8";
-pub const PIPELINE: &str = "embeddinggemma2-bfcd298-q8-llama4d756bc-mean-v1-readers1";
+pub const PIPELINE: &str = "embeddinggemma2-bfcd298-q8-llama4d756bc-mean-v1";
 pub struct ModelFile {
     pub name: &'static str,
     pub bytes: u64,

@@ -5,6 +5,7 @@ It provides deterministic discovery events, without depending on a user's files
 or changing their running LocalSearch instance. Inference is never mocked.
 """
 import concurrent.futures
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -175,14 +176,14 @@ class EndToEnd(unittest.TestCase):
         old = self.docs / "Tomato Soup.md"
         new = self.docs / "Dinner Recipe.md"
         database = ROOT / "data/gseek/index.sqlite3"
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db:
             before = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
         old.rename(new)
         self.add(new)
         self.remove(old)
         wait_for(lambda: any(h["name"] == new.name for h in self.search("roasted tomato soup")))
         wait_for(lambda: self.status()["counts"]["pending"] == 0)
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM chunks").fetchone()[0], before)
         new.unlink()
         self.remove(new)
@@ -201,11 +202,11 @@ class EndToEnd(unittest.TestCase):
         large.write_text("The coastal observatory records tides, migrating birds, and rainfall every morning. " * 5000)
 
         def partial():
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 return db.execute("SELECT contents.id,count(chunks.id) FROM contents JOIN chunks ON chunks.content=contents.id WHERE complete=0 GROUP BY contents.id HAVING count(chunks.id)>0").fetchone()
 
         def file_state(path):
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 row = db.execute("SELECT state FROM files WHERE uri=?", (path.as_uri(),)).fetchone()
                 return row[0] if row else None
 
@@ -243,7 +244,7 @@ class EndToEnd(unittest.TestCase):
         note.write_text("A handmade ceramic teapot with a green glaze.")
         database = ROOT / "data/gseek/index.sqlite3"
         def note_state():
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 row = db.execute("SELECT state FROM files WHERE uri=?", (note.as_uri(),)).fetchone()
                 return row[0] if row else None
         self.add(note)
@@ -267,7 +268,7 @@ class EndToEnd(unittest.TestCase):
         database = ROOT / "data/gseek/index.sqlite3"
 
         def state():
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 row = db.execute("SELECT state FROM files WHERE uri=?", (picture.as_uri(),)).fetchone()
                 return row[0] if row else None
 
@@ -276,7 +277,10 @@ class EndToEnd(unittest.TestCase):
             wait_for(lambda: state() == "skipped")
             settings["images"] = True
             self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
-            wait_for(lambda: state() == "indexed", timeout=300)
+            try:
+                wait_for(lambda: state() == "indexed", timeout=300)
+            except AssertionError as error:
+                raise AssertionError(f"Image indexing did not finish: file={state()}, service={self.status()}") from error
         finally:
             picture.unlink(missing_ok=True)
             self.remove(picture)

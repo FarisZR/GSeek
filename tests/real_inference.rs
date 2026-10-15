@@ -90,7 +90,41 @@ fn multimodal_vectors_share_one_space() -> Result<()> {
         bytes.extend_from_slice(&[240, 20, 20]);
     }
     fs::write(&image, bytes)?;
-    let picture = runtime.embed(&Input::Image { path: image })?;
+    let reader_settings = Settings {
+        folders: vec![dir.path().into()],
+        ..settings.clone()
+    };
+    let record = gseek::discovery::record_from_uri(
+        url::Url::from_file_path(&image).unwrap().as_str(),
+        &reader_settings,
+    )?
+    .unwrap();
+    let mut picture = None;
+    gseek::extract::read(&record, &reader_settings, dir.path(), |part| {
+        let Input::Image { path } = &part.input else {
+            anyhow::bail!("Expected an image part")
+        };
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()?;
+        anyhow::ensure!(probe.status.success(), "Cannot probe the extracted image");
+        assert_eq!(
+            String::from_utf8(probe.stdout)?.trim(),
+            "128,128",
+            "Small images must not be enlarged before inference"
+        );
+        picture = Some(runtime.embed(&part.input)?);
+        Ok(())
+    })?;
+    let picture = picture.expect("The reader emitted an image");
     validate_vector(&picture)?;
     let wav = dir.path().join("tone.wav");
     checked(
