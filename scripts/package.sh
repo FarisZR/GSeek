@@ -15,6 +15,8 @@ chmod 755 "$bundle/bin/gseek"
 cp -a dist/runtime/cpu dist/runtime/vulkan "$bundle/runtime/"
 cp LICENSE "$bundle/licenses/GSeek-GPL-3.0"
 cp docs/THIRD_PARTY.md "$bundle/licenses/THIRD_PARTY.md"
+cp data/io.github.FarisZR.GSeek.ini dist/package/gseek-search-provider.ini
+cargo metadata --locked --format-version 1 | python3 scripts/dependency-notices.py > "$bundle/licenses/RUST-DEPENDENCIES.txt"
 if [[ -f dist/runtime-manifest.json ]]; then cp dist/runtime-manifest.json "$bundle/"; fi
-tar -C dist/package -czf "dist/gseek-linux-$arch.tar.gz" gseek
+tar -C dist/package -czf "dist/gseek-linux-$arch.tar.gz" gseek gseek-search-provider.ini
 sha256sum "dist/gseek-linux-$arch.tar.gz"

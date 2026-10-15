@@ -14,6 +14,15 @@ env:
   GSETTINGS_BACKEND: memory
 
 jobs:
+  packaging:
+    name: Release contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   native:
     name: GNOME 51 / ${{ matrix.distro }} / ${{ matrix.backend }}
     runs-on: ubuntu-24.04
@@ -67,6 +76,8 @@ jobs:
         shell: bash
         env:
           GSK_RENDERER: cairo
+          GSETTINGS_BACKEND: keyfile
+          GSEEK_TEST_SHELL: '1'
           GSEEK_TEST_BACKEND: ${{ matrix.backend }}
           GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
           GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots

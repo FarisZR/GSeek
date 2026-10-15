@@ -92,12 +92,6 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
             format!("[D-BUS Service]\nName={BUS_NAME}\nExec={dbus_exec} service\n"),
         ),
         (
-            data.join(format!("gnome-shell/search-providers/{APP_ID}.ini")),
-            format!(
-                "[Shell Search Provider]\nDesktopId={PROVIDER}\nBusName={BUS_NAME}\nObjectPath=/io/github/FarisZR/GSeek/SearchProvider\nVersion=2\nDefaultDisabled=true\n"
-            ),
-        ),
-        (
             config.join(format!("autostart/{APP_ID}.desktop")),
             format!(
                 "[Desktop Entry]\nType=Application\nName=GSeek\nExec={exec} service\nIcon={APP_ID}\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\nOnlyShowIn=GNOME;\n"
@@ -146,6 +140,19 @@ fn search_settings() -> Result<gio::Settings> {
 }
 
 pub fn enable_search(paths: &Paths) -> Result<()> {
+    if !glib::system_data_dirs().iter().any(|directory| {
+        directory
+            .join(format!("gnome-shell/search-providers/{APP_ID}.ini"))
+            .is_file()
+    }) {
+        bail!(
+            "GNOME cannot find GSeek’s system search-provider registration. Reinstall GSeek through Homebrew to repair desktop integration."
+        );
+    }
+    update_search_settings(paths)
+}
+
+fn update_search_settings(paths: &Paths) -> Result<()> {
     let settings = search_settings()?;
     let mut manifest = load(paths)?;
     let mut disabled: Vec<String> = settings
@@ -282,8 +289,8 @@ mod tests {
         let settings = search_settings()?;
         settings.set_strv("disabled", ["org.example.Before.desktop"])?;
         settings.set_strv("enabled", ["org.example.Enabled.desktop"])?;
-        enable_search(&paths)?;
-        enable_search(&paths)?;
+        update_search_settings(&paths)?;
+        update_search_settings(&paths)?;
         assert!(
             settings
                 .strv("disabled")

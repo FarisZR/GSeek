@@ -37,6 +37,7 @@ jobs:
         with:
           path: build
           key: gpu-${{ matrix.backend }}-${{ matrix.arch }}-${{ hashFiles('inference/**', 'scripts/build-inference.sh', '.github/workflows/gpu.yml') }}
+          restore-keys: gpu-${{ matrix.backend }}-${{ matrix.arch }}-
       - name: Compile and package the pinned helper
         env:
           IMAGE: ${{ matrix.image }}
