@@ -125,7 +125,8 @@ checks, and release packaging, and [Architecture](docs/ARCHITECTURE.md) for proc
 boundaries and storage contracts.
 
 GitHub Actions covers GNOME 51 on Fedora 45 and Ubuntu 26.10, CPU and Vulkan,
-Homebrew lifecycle on both architectures, native GTK views, actual overview
+Homebrew lifecycle and installation/link checks for all three upstream runtimes
+on both architectures, native GTK views, actual overview
 search, multilingual retrieval, multimodal readers, database migrations, progress
 recovery, provider metadata and activation, and explicit inference failures.
 

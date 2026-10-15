@@ -349,13 +349,22 @@ impl Worker {
                 json!({"prompt_string":self.media_marker,"multimodal_data":[base64::engine::general_purpose::STANDARD.encode(data)]})
             }
         };
-        let response: Value = self
+        let mut reply = self
             .client
             .post("http://127.0.0.1/embedding")
+            .config()
+            .http_status_as_error(false)
+            .build()
             .send_json(json!({"content":content,"embd_normalize":2}))
-            .context("Embedding failed; see Indexing & Activity for diagnostics")?
-            .body_mut()
-            .read_json()?;
+            .context("Embedding failed; see Indexing & Activity for diagnostics")?;
+        let status = reply.status();
+        let response: Value = reply.body_mut().read_json()?;
+        if !status.is_success() {
+            let message = response["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown runtime error");
+            bail!("Embedding failed ({status}): {message}");
+        }
         let embedding = &response[0]["embedding"];
         let embedding = if embedding[0].is_array() {
             &embedding[0]

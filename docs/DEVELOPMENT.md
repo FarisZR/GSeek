@@ -75,7 +75,8 @@ from the real model, then captures `overview.png`.
 CI executes these checks on GNOME 51 / Fedora 45 and Ubuntu 26.10, for CPU and
 Vulkan. Software Vulkan is slower; CI permits a 300-second inference timeout.
 Physical CUDA/AMD GPU validation remains a hardware task; green CI does not
-establish GPU performance or support for every driver. No CI job builds an
+establish GPU performance or support for every driver. Both architectures verify installation and dynamic linking of the official CPU,
+Vulkan, and CUDA archives, including CUDA redistributables. No CI job builds an
 inference engine or GPU SDK.
 
 ## Releases

@@ -123,7 +123,7 @@ jobs:
           brew update
           brew install ffmpeg poppler libarchive
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config xvfb xauth dbus-x11
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config xvfb xauth dbus-x11 libvulkan1
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG=/usr/bin/pkg-config" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_LIBDIR=/usr/lib/$(gcc -dumpmachine)/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
@@ -133,7 +133,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: brew-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+            .runtime-data/gseek/runtimes
+          key: brew-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
       - name: Build the native application and test its cask
         shell: bash
         run: |
@@ -141,3 +142,7 @@ jobs:
           cargo build --locked --release
           bash scripts/package.sh
           python3 scripts/test-homebrew.py
+      - name: Verify upstream runtime installation for all three backends
+        env:
+          XDG_DATA_HOME: ${{ github.workspace }}/.runtime-data
+        run: cargo test --locked --lib managed_runtime::tests::official_runtime_distributions_install_and_link -- --ignored --nocapture
