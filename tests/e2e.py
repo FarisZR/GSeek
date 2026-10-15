@@ -235,17 +235,19 @@ class EndToEnd(unittest.TestCase):
     def test_06_exclusions_prune_previously_indexed_files(self):
         note = self.docs / "Excluded Note.md"
         note.write_text("A handmade ceramic teapot with a green glaze.")
+        database = ROOT / "data/gseek/index.sqlite3"
+        def note_state():
+            with sqlite3.connect(database) as db:
+                row = db.execute("SELECT state FROM files WHERE uri=?", (note.as_uri(),)).fetchone()
+                return row[0] if row else None
         self.add(note)
+        wait_for(lambda: note_state() == "indexed")
         wait_for(lambda: any(hit["name"] == note.name for hit in self.search("Excluded Note.md")))
         settings = json.loads(self.invoke("Settings")[0])
         settings["excluded_extensions"] = ["md"]
         self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
         wait_for(lambda: self.status()["ready"])
-        database = ROOT / "data/gseek/index.sqlite3"
-        def pruned():
-            with sqlite3.connect(database) as db:
-                return db.execute("SELECT count(*) FROM files WHERE uri=?", (note.as_uri(),)).fetchone()[0] == 0
-        wait_for(pruned)
+        wait_for(lambda: note_state() is None)
         self.assertFalse(any(hit["name"] == note.name for hit in self.search("Excluded Note.md")))
         self.assertEqual(self.search("INV-2026-0042")[0]["name"], "Rechnung.txt")
 
