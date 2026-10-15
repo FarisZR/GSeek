@@ -11,8 +11,8 @@ Private, multilingual search in GNOME Activities, powered by
 <p align="center"><img src="docs/screenshots/overview.png" width="900" alt="GNOME Activities finding Rental Agreement.txt through GSeek when searching for the clause about pets in my lease."></p>
 
 Describe a document, picture, or moment in a recording. GSeek finds the match in
-the GNOME overview you already use. Its native app also lets you explore more
-results and manage your search library.
+the GNOME overview you already use. The native app manages setup, indexing
+activity, and preferences.
 
 ## What you can find
 
@@ -21,8 +21,6 @@ results and manage your search library.
 - **Exact details:** filenames, paths, invoice numbers, and words inside documents contribute to ranking alongside semantic similarity.
 - **Media:** pictures and screenshots, PDF text and scanned pages, audio segments, and sampled video frames share the model’s embedding space.
 - **Your usual files:** native file icons, existing thumbnails, folders, and opening results in their default applications.
-
-<p align="center"><img src="docs/screenshots/search.png" width="800" alt="GSeek’s native search window finding the rental agreement."></p>
 
 ## Install
 

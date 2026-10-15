@@ -40,6 +40,7 @@ cargo test --locked --all-targets
 cargo test --locked --no-default-features --lib
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 cargo test --locked --test real_inference -- --ignored --test-threads=1
+cargo test --locked --lib inference::tests::worker_restarts_after_process_failure -- --ignored --test-threads=1
 ```
 
 Real inference tests deliberately require the model. They check the fixed
@@ -82,7 +83,8 @@ performance or support for every driver.
 ## Releases
 
 A `vX.Y.Z` tag or a manual Release workflow builds both native architectures,
-CPU/Vulkan helpers, and CUDA/ROCm redistributable bundles. It combines checksums
+CPU/Vulkan helpers, and CUDA/ROCm redistributable bundles. Each architecture runs
+the packaged CPU encoder against the reference vector before upload. It combines checksums
 into a runtime manifest embedded in both core packages, generates the Homebrew
 cask and `SHA256SUMS`, and stages a **draft** GitHub release. Rust license inventory,
 helper source revision, and third-party notices travel with the package.

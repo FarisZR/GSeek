@@ -9,8 +9,6 @@ use std::path::PathBuf;
     about = "Find your files by what you remember, from GNOME Search"
 )]
 struct Args {
-    #[arg(long, allow_hyphen_values = true)]
-    query: Option<String>,
     #[command(subcommand)]
     command: Option<Action>,
 }
@@ -100,7 +98,7 @@ fn run() -> Result<()> {
         None => {
             #[cfg(feature = "gui")]
             {
-                gseek::ui::run(paths, args.query)
+                gseek::ui::run(paths)
             }
             #[cfg(not(feature = "gui"))]
             {

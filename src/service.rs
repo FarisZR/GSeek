@@ -205,14 +205,12 @@ pub fn run(paths: Paths) -> Result<()> {
                                 invocation.return_value(None);
                             }
                             "LaunchSearch" => {
-                                let (terms, _) = parameters
+                                let (_terms, _) = parameters
                                     .get::<(Vec<String>, u32)>()
                                     .context("Invalid search")?;
                                 let launcher = launcher()?;
-                                std::process::Command::new(launcher)
-                                    .arg("--query")
-                                    .arg(terms.join(" "))
-                                    .spawn()?;
+                                // Activities owns search; the app provides setup and indexing controls.
+                                std::process::Command::new(launcher).spawn()?;
                                 invocation.return_value(None);
                             }
                             _ => bail!("Unknown search-provider method"),

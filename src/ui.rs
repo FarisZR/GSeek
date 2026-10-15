@@ -2,7 +2,6 @@ use crate::{
     APP_ID,
     config::{Backend, External, Paths, Settings},
     integration, service,
-    store::SearchHit,
 };
 use adw::prelude::*;
 use anyhow::Result;
@@ -15,12 +14,7 @@ use std::{
 
 struct Window {
     window: adw::ApplicationWindow,
-    entry: gtk::SearchEntry,
-    results: gtk::ListBox,
-    result_state: adw::StatusPage,
-    result_stack: gtk::Stack,
     main_stack: gtk::Stack,
-    view_stack: adw::ViewStack,
     banner: adw::Banner,
     status_title: gtk::Label,
     status_detail: gtk::Label,
@@ -29,16 +23,12 @@ struct Window {
     current: gtk::Label,
     logs: gtk::ListBox,
     pause: gtk::Button,
-    generation: Cell<u64>,
     refreshing: Cell<bool>,
     paths: Paths,
 }
 
-pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
-        .build();
+pub fn run(paths: Paths) -> Result<()> {
+    let app = adw::Application::builder().application_id(APP_ID).build();
     let current: Rc<RefCell<Option<Rc<Window>>>> = Rc::new(RefCell::new(None));
     let state = current.clone();
     let app_paths = paths.clone();
@@ -63,23 +53,7 @@ pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
         });
         *state.borrow_mut() = Some(ui);
     });
-    let state = current.clone();
-    app.connect_command_line(move |app, command| {
-        app.activate();
-        let args = command.arguments();
-        if let Some(ui) = state.borrow().as_ref()
-            && let Some(query) = args
-                .get(1)
-                .and_then(|s| s.to_str())
-                .filter(|s| !s.is_empty())
-        {
-            ui.view_stack.set_visible_child_name("search");
-            ui.entry.set_text(query);
-            ui.entry.grab_focus();
-        }
-        glib::ExitCode::SUCCESS
-    });
-    let exit = app.run_with_args(&["gseek", query.as_deref().unwrap_or("")]);
+    let exit = app.run_with_args(&["gseek"]);
     if exit != glib::ExitCode::SUCCESS {
         anyhow::bail!("Application exited with {exit:?}");
     }
@@ -146,73 +120,10 @@ impl Window {
         let banner = adw::Banner::builder()
             .use_markup(false)
             .title("Setting up semantic search")
-            .button_label("View Activity")
             .revealed(false)
             .build();
         body.append(&banner);
-        let view_stack = adw::ViewStack::new();
-        view_stack.set_vexpand(true);
-        body.append(&view_stack);
         main_stack.add_named(&body, Some("library"));
-        let switcher = adw::ViewSwitcher::builder()
-            .stack(&view_stack)
-            .policy(adw::ViewSwitcherPolicy::Wide)
-            .build();
-        header.set_title_widget(Some(&switcher));
-        let switcher_bar = adw::ViewSwitcherBar::builder()
-            .stack(&view_stack)
-            .reveal(true)
-            .build();
-        root.add_bottom_bar(&switcher_bar);
-        // Let the title switcher collapse naturally on narrow windows, keeping the same destinations below.
-        let breakpoint =
-            adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 600px").unwrap());
-        breakpoint.add_setter(&switcher, "visible", Some(&false.to_value()));
-        breakpoint.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
-        window.add_breakpoint(breakpoint);
-        switcher_bar.set_reveal(false);
-
-        let search_box = vertical(16);
-        margins(&search_box, 24);
-        let entry = gtk::SearchEntry::builder()
-            .placeholder_text("Describe what you’re looking for…")
-            .hexpand(true)
-            .build();
-        entry.set_tooltip_text(Some(
-            "Search filenames, exact words, and meaning in any language",
-        ));
-        let clamp = adw::Clamp::builder()
-            .maximum_size(760)
-            .child(&entry)
-            .build();
-        search_box.append(&clamp);
-        let result_stack = gtk::Stack::new();
-        result_stack.set_vexpand(true);
-        let result_state=adw::StatusPage::builder().icon_name("system-search-symbolic").title("What are you looking for?")
-            .description("Try “the clause about pets”, “a photo of the beach”,\nor describe a file in English, German, or Arabic.").build();
-        result_stack.add_named(&result_state, Some("message"));
-        let results = gtk::ListBox::new();
-        results.set_valign(gtk::Align::Start);
-        results.add_css_class("boxed-list");
-        results.set_selection_mode(gtk::SelectionMode::Single);
-        let scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .child(&results)
-            .build();
-        let result_clamp = adw::Clamp::builder()
-            .maximum_size(800)
-            .child(&scroll)
-            .build();
-        result_stack.add_named(&result_clamp, Some("results"));
-        search_box.append(&result_stack);
-        let hint = label("Search here or press Super and start typing.", "dim-label");
-        search_box.append(&hint);
-        view_stack.add_titled_with_icon(
-            &search_box,
-            Some("search"),
-            "Search",
-            "system-search-symbolic",
-        );
 
         let activity_box = vertical(20);
         margins(&activity_box, 24);
@@ -223,6 +134,9 @@ impl Window {
         status_detail.set_xalign(0.0);
         status_detail.set_selectable(true);
         activity_box.append(&status_detail);
+        let hint = label("Press Super and describe what you remember.", "dim-label");
+        hint.set_xalign(0.0);
+        activity_box.append(&hint);
         let progress = gtk::ProgressBar::new();
         activity_box.append(&progress);
         let counts = label("", "heading");
@@ -264,20 +178,10 @@ impl Window {
             .maximum_size(800)
             .child(&activity_box)
             .build();
-        view_stack.add_titled_with_icon(
-            &activity_clamp,
-            Some("activity"),
-            "Indexing & Activity",
-            "view-list-symbolic",
-        );
+        body.append(&activity_clamp);
         let ui = Rc::new(Self {
             window,
-            entry,
-            results,
-            result_state,
-            result_stack,
             main_stack,
-            view_stack,
             banner,
             status_title,
             status_detail,
@@ -286,7 +190,6 @@ impl Window {
             current: current_file,
             logs,
             pause,
-            generation: Cell::new(0),
             refreshing: Cell::new(false),
             paths,
         });
@@ -295,12 +198,6 @@ impl Window {
         start.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
                 ui.setup();
-            }
-        });
-        let weak = Rc::downgrade(&ui);
-        ui.banner.connect_button_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                ui.view_stack.set_visible_child_name("activity");
             }
         });
         let weak = Rc::downgrade(&ui);
@@ -322,29 +219,6 @@ impl Window {
                 }
             });
         }
-        let weak = Rc::downgrade(&ui);
-        ui.entry.connect_search_changed(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                ui.start_search();
-            }
-        });
-        let weak = Rc::downgrade(&ui);
-        ui.entry.connect_activate(move |_| {
-            if let Some(ui) = weak.upgrade()
-                && let Some(row) = ui.results.row_at_index(0)
-            {
-                ui.results.emit_by_name::<()>("row-activated", &[&row]);
-            }
-        });
-        let weak = Rc::downgrade(&ui);
-        ui.results.connect_row_activated(move |_, row| {
-            if let Some(ui) = weak.upgrade()
-                && let Some(uri) = row.tooltip_text()
-                && let Err(e) = integration::open_result(&ui.paths, &uri)
-            {
-                ui.error(&format!("{e:#}"));
-            }
-        });
         let preferences = gio::SimpleAction::new("preferences", None);
         let weak = Rc::downgrade(&ui);
         preferences.connect_activate(move |_, _| {
@@ -362,16 +236,6 @@ impl Window {
         }});
         app.add_action(&about);
         app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
-        let focus = gio::SimpleAction::new("focus-search", None);
-        let weak = Rc::downgrade(&ui);
-        focus.connect_activate(move |_, _| {
-            if let Some(ui) = weak.upgrade() {
-                ui.view_stack.set_visible_child_name("search");
-                ui.entry.grab_focus();
-            }
-        });
-        app.add_action(&focus);
-        app.set_accels_for_action("app.focus-search", &["<Primary>f"]);
         ui
     }
 
@@ -468,7 +332,7 @@ impl Window {
                 }
             }
         });
-        if self.view_stack.visible_child_name().as_deref() == Some("activity") {
+        {
             let weak = Rc::downgrade(self);
             spawn(service::read_activity, move |result| {
                 if let Some(ui) = weak.upgrade()
@@ -498,91 +362,6 @@ impl Window {
                 }
             });
         }
-    }
-
-    fn start_search(self: &Rc<Self>) {
-        let query = self.entry.text().to_string();
-        let generation = self.generation.get() + 1;
-        self.generation.set(generation);
-        if query.trim().is_empty() {
-            self.result_state.set_title("What are you looking for?");
-            self.result_state
-                .set_description(Some("Describe a file in your own words, or type its name."));
-            self.result_stack.set_visible_child_name("message");
-            return;
-        }
-        self.result_state.set_title("Searching…");
-        self.result_state
-            .set_description(Some("Matching your words with your files."));
-        self.result_stack.set_visible_child_name("message");
-        let weak = Rc::downgrade(self);
-        spawn(
-            move || service::search(&query, 100),
-            move |result| {
-                if let Some(ui) = weak.upgrade() {
-                    if ui.generation.get() != generation {
-                        return;
-                    }
-                    match result {
-                        Ok(hits) if !hits.is_empty() => {
-                            clear_list(&ui.results);
-                            for hit in hits {
-                                ui.append_hit(&hit);
-                            }
-                            ui.result_stack.set_visible_child_name("results");
-                        }
-                        Ok(_) => {
-                            ui.result_state.set_title("No matching files");
-                            ui.result_state.set_description(Some("Try another description, or check your search locations in Preferences."));
-                            ui.result_stack.set_visible_child_name("message");
-                        }
-                        Err(e) => {
-                            ui.result_state.set_title("Semantic search is unavailable");
-                            ui.result_state.set_description(Some(&glib::markup_escape_text(&format!(
-                                "{e:#}\n\nOpen Indexing & Activity or retry setup in Preferences."
-                            ))));
-                            ui.result_stack.set_visible_child_name("message");
-                        }
-                    }
-                }
-            },
-        );
-    }
-
-    fn append_hit(&self, hit: &SearchHit) {
-        let location = self
-            .paths
-            .load()
-            .map(|s| s.location_label(hit.path.parent().unwrap_or(&hit.path)))
-            .unwrap_or_else(|_| hit.path.to_string_lossy().into_owned());
-        let suffix = if let Some(page) = hit.page {
-            format!(" · Page {page}")
-        } else if let Some(s) = hit.seconds {
-            format!(" · {}:{:02}", s as u64 / 60, s as u64 % 60)
-        } else {
-            String::new()
-        };
-        let detail = if hit.snippet.trim().is_empty() {
-            format!("{location}{suffix}")
-        } else {
-            format!(
-                "{}\n{location}{suffix}",
-                hit.snippet.lines().collect::<Vec<_>>().join(" ")
-            )
-        };
-        let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&hit.name))
-            .subtitle(glib::markup_escape_text(&detail))
-            .activatable(true)
-            .build();
-        row.set_title_lines(1);
-        row.set_subtitle_lines(2);
-        row.set_tooltip_text(Some(&hit.uri));
-        let image = gtk::Image::from_gicon(&integration::icon_for(&hit.path, &hit.mime));
-        image.set_pixel_size(40);
-        row.add_prefix(&image);
-        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        self.results.append(&row);
     }
 
     fn apply_settings(
@@ -622,7 +401,6 @@ impl Window {
                                 dialog.close();
                             }
                             ui.main_stack.set_visible_child_name("library");
-                            ui.view_stack.set_visible_child_name("activity");
                             ui.refresh();
                         }
                         Err(error) => ui.error(&format!("{error:#}")),
@@ -1185,28 +963,12 @@ mod tests {
             ui.window.is_mapped()
                 && ui.main_stack.visible_child_name().as_deref() == Some("library")
         });
-        ui.entry.set_text("the clause about pets in my lease");
-        until(|| {
-            ui.results.first_child().is_some()
-                && ui.result_stack.visible_child_name().as_deref() == Some("results")
-        });
-        assert!(
-            ui.results
-                .first_child()
-                .unwrap()
-                .tooltip_text()
-                .unwrap()
-                .contains("Rental")
-        );
         let output = std::env::var_os("GSEEK_SCREENSHOT_DIR").map(PathBuf::from);
         if let Some(dir) = &output {
             std::fs::create_dir_all(dir).unwrap();
-            capture(&ui.window, &dir.join("search.png"));
         }
-        ui.view_stack.set_visible_child_name("activity");
-        ui.refresh();
         until(|| ui.logs.first_child().is_some());
-        // Allow a full frame after changing pages before recording the native widget scene.
+        // Allow a full frame before recording the native widget scene.
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(300));
         if let Some(dir) = &output {
@@ -1229,12 +991,11 @@ mod tests {
         }
         close_dialog(&ui.window);
         ui.window.set_default_size(390, 700);
-        ui.view_stack.set_visible_child_name("search");
         until(|| ui.window.width() <= 400);
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(300));
         if let Some(dir) = &output {
-            capture(&ui.window, &dir.join("search-narrow.png"));
+            capture(&ui.window, &dir.join("activity-narrow.png"));
         }
         ui.window.close();
     }

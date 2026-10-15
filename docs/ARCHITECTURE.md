@@ -36,7 +36,7 @@ existing indexed content; newer unknown schemas are rejected.
 Search requires a validated embedding. Filenames and paths, exact text, and
 semantic cosine similarity contribute to ranking. Weak semantic neighbors are
 filtered relative to the best match. Results are deduplicated by file. The service
-bounds its queue and drops stale requests separately for Shell and the app; it
+bounds its queue and drops stale requests separately for Shell and diagnostic clients; it
 returns a complete result set rather than continuously inserting reordered rows.
 Vector scans stream from SQLite with a bounded page cache instead of loading the
 entire collection. This favors a minimal dependency tree; ANN is a future option
@@ -48,7 +48,11 @@ The model revision, GGUF sizes and SHA-256 values, llama.cpp source revision, an
 embedding reference vector are pinned together. Managed text, image, and audio
 inputs share one embedding space; video and PDFs emit bounded frame/page parts.
 A reference canary validates query framing and pooling at setup. There is no
-keyword-only mode when inference is unavailable.
+keyword-only mode when inference is unavailable. The helper allocates its encoder
+context from the actual input token count and grows it only when needed, keeping
+short-query and software-Vulkan memory use bounded by the request. Auto hardware
+selection retries with another backend if initialization or inference fails; an
+explicit backend reports its failure.
 
 External endpoints expose text only. The service requires the configured model
 identifier, finite normalized 768-dimensional vectors, and agreement with the
