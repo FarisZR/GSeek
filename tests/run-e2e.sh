@@ -2,7 +2,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$(mktemp -d -t gseek-e2e-XXXXXXXX)
-trap 'rm -rf "$root"' EXIT
+cleanup() {
+  if [[ -n "${session_pid:-}" ]]; then
+    # Shell can activate desktop helpers (for example Evolution). dbus-run-session
+    # does not wait for those processes when its main client exits. Keep all of
+    # them in a private process group and stop it before removing their XDG data.
+    kill -TERM -- "-$session_pid" 2>/dev/null || true
+    for _ in {1..40}; do
+      kill -0 -- "-$session_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    kill -KILL -- "-$session_pid" 2>/dev/null || true
+  fi
+  rm -rf "$root"
+}
+trap cleanup EXIT
 export GSEEK_TEST_ROOT="$root"
 export XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
@@ -18,4 +32,6 @@ if [[ -n "${GSEEK_TEST_MODEL_CACHE:-}" ]]; then
   mkdir -p "$GSEEK_TEST_MODEL_CACHE"
   ln -s "$GSEEK_TEST_MODEL_CACHE" "$XDG_DATA_HOME/gseek/models"
 fi
-dbus-run-session -- "${GSEEK_TEST_PYTHON:-/usr/bin/python3}" tests/e2e.py
+setsid dbus-run-session -- "${GSEEK_TEST_PYTHON:-/usr/bin/python3}" tests/e2e.py &
+session_pid=$!
+wait "$session_pid"
