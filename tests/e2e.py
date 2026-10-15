@@ -74,7 +74,7 @@ class EndToEnd(unittest.TestCase):
             path.write_text(content)
             cls.add(path)
         cls.add(cls.docs)
-        settings = {"version": 1, "configured": False, "folders": [str(cls.docs)], "backend": os.environ.get("GSEEK_TEST_BACKEND", "cpu")}
+        settings = {"version": 1, "configured": False, "folders": [str(cls.docs)], "backend": os.environ.get("GSEEK_TEST_BACKEND", "cpu"), "search_enabled": True}
         (ROOT / "config/gseek/settings.json").write_text(json.dumps(settings))
         cls.service_log = open(ROOT / "service.log", "w")
         subprocess.run([BINARY, "integrate"], check=True)
@@ -147,6 +147,12 @@ class EndToEnd(unittest.TestCase):
         wait_for(output.exists)
         self.assertTrue(any(Gio.File.new_for_commandline_arg(arg).equal(Gio.File.new_for_uri(uri)) for arg in json.loads(output.read_text())))
 
+    def test_02c_real_gnome_overview_loads_and_queries_the_provider(self):
+        if not os.environ.get("GSEEK_TEST_SHELL"):
+            self.skipTest("Set GSEEK_TEST_SHELL=1 with the keyfile settings backend for a private headless GNOME session")
+        from shell import check_overview
+        check_overview(self.bus, ROOT, wait_for)
+
     def test_03_pause_persists_and_resume_processes_new_files(self):
         self.command("pause")
         self.assertTrue(self.status()["paused"])
@@ -181,6 +187,50 @@ class EndToEnd(unittest.TestCase):
             results = list(pool.map(self.search, ["lease pets", "train berlin"] * 8))
         self.assertTrue(any(results))
         self.assertTrue(self.status()["ready"])
+
+    def test_05b_large_jobs_yield_and_resume_checkpoints_after_service_restart(self):
+        large = self.docs / "Observatory Archive.txt"
+        small = self.docs / "Urgent Appointment.txt"
+        database = ROOT / "data/gseek/index.sqlite3"
+        large.write_text("The coastal observatory records tides, migrating birds, and rainfall every morning. " * 5000)
+
+        def partial():
+            with sqlite3.connect(database) as db:
+                return db.execute("SELECT contents.id,count(chunks.id) FROM contents JOIN chunks ON chunks.content=contents.id WHERE complete=0 GROUP BY contents.id HAVING count(chunks.id)>0").fetchone()
+
+        def file_state(path):
+            with sqlite3.connect(database) as db:
+                row = db.execute("SELECT state FROM files WHERE uri=?", (path.as_uri(),)).fetchone()
+                return row[0] if row else None
+
+        try:
+            self.add(large)
+            wait_for(partial)
+            small.write_text("Urgent appointment: collect the new telescope from the astronomy shop tomorrow.")
+            self.add(small)
+            wait_for(lambda: file_state(small) == "indexed")
+            self.assertEqual(file_state(large), "pending", "The smaller new file must finish before the long archive")
+            self.assertEqual(self.search("collect the new telescope")[0]["name"], small.name)
+            self.command("pause")
+            content, completed = partial()
+            self.assertGreater(completed, 0)
+            self.command("quit")
+            wait_for(lambda: not self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", (BUS,)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
+            wait_for(lambda: self.status()["ready"], timeout=300)
+            self.assertTrue(self.status()["paused"])
+            self.assertGreaterEqual(partial()[1], completed)
+            self.command("resume")
+            def resumed():
+                rows = json.loads(self.invoke("Activity")[0])
+                return any(row["state"] == "resumed" and large.as_uri() == row["path"] for row in rows)
+            wait_for(resumed)
+            self.assertEqual(partial()[0], content)
+        finally:
+            for path in [large, small]:
+                path.unlink(missing_ok=True)
+                self.remove(path)
+            self.command("resume")
+            wait_for(lambda: self.status()["counts"]["pending"] == 0)
 
     def test_06_exclusions_prune_previously_indexed_files(self):
         settings = json.loads(self.invoke("Settings")[0])

@@ -992,11 +992,14 @@ fn fill_folders(
     };
     for path in folders {
         let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&path.to_string_lossy()))
+            .title(glib::markup_escape_text(
+                &draft.borrow().location_label(&path),
+            ))
             .build();
+        row.set_tooltip_text(Some(&path.to_string_lossy()));
         row.set_title_lines(1);
         row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
-        if !excluded {
+        if !excluded && draft.borrow().configured {
             let reindex = gtk::Button::builder()
                 .icon_name("view-refresh-symbolic")
                 .tooltip_text("Reindex This Location")
@@ -1142,6 +1145,17 @@ mod tests {
             .save_to_png(path)
             .unwrap();
     }
+    fn close_dialog(window: &adw::ApplicationWindow) {
+        let dialog = window.visible_dialog().unwrap();
+        let closed = Rc::new(Cell::new(false));
+        let flag = closed.clone();
+        dialog.connect_closed(move |_| flag.set(true));
+        dialog.close();
+        until(|| closed.get());
+        // Complete the parent allocation after the dialog leaves its host.
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+    }
     #[test]
     #[ignore = "Needs a display and the real inference fixture; run tests/run-e2e.sh with GSEEK_GUI_TEST_COMMAND"]
     fn native_views() {
@@ -1191,6 +1205,23 @@ mod tests {
         until(|| frame.elapsed() > Duration::from_millis(400));
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("preferences.png"));
+        }
+        close_dialog(&ui.window);
+        ui.setup();
+        until(|| ui.window.visible_dialog().is_some());
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(400));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("setup.png"));
+        }
+        close_dialog(&ui.window);
+        ui.window.set_default_size(390, 700);
+        ui.view_stack.set_visible_child_name("search");
+        until(|| ui.window.width() <= 400);
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("search-narrow.png"));
         }
         ui.window.close();
     }

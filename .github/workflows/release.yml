@@ -1,0 +1,88 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  core:
+    name: Native package / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config cmake ninja-build libvulkan-dev glslc spirv-headers clang
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            build
+          key: release-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'inference/**', 'scripts/build-inference.sh') }}
+          restore-keys: release-${{ matrix.arch }}-
+      - name: Build native app and bundled CPU and Vulkan helpers
+        run: |
+          cargo build --release --locked
+          bash scripts/build-inference.sh cpu
+          bash scripts/build-inference.sh vulkan
+          bash scripts/package.sh '${{ matrix.arch }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-${{ matrix.arch }}
+          path: dist/gseek-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+  gpu:
+    uses: ./.github/workflows/gpu.yml
+  assemble:
+    name: Assemble and stage release
+    needs: [core, gpu]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release-artifacts
+      - name: Assemble and validate checksums
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [[ "$REF_TYPE" == tag ]]; then test "$REF_NAME" = "v$version"; fi
+          python3 scripts/assemble-release.py "$version" release-artifacts release
+          (cd release && sha256sum --check SHA256SUMS)
+          ruby -c release/gseek.rb
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Stage a draft release for installation verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --json isDraft --jq .isDraft > /tmp/gseek-release-draft 2>/dev/null; then
+            test "$(cat /tmp/gseek-release-draft)" = true
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* --target "$GITHUB_SHA" --title "GSeek $RELEASE_VERSION" --draft --generate-notes
+          fi

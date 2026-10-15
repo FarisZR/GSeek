@@ -29,6 +29,8 @@ def render(version, url, arm_sha, intel_sha):
   depends_on formula: %w[ffmpeg poppler libarchive]
 
   artifact "gseek", target: "~/.local/share/gseek-app"
+  artifact "gseek-search-provider.ini",
+           target: "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"
 
   postflight do
@@ -49,6 +51,7 @@ def render(version, url, arm_sha, intel_sha):
     Open GSeek from your application menu to finish setup. The model downloads
     once (865 MB). GNOME 51 is the supported desktop; your files stay local.
     GSeek can enable its provider and disable Files search during setup.
+    The system search-provider registration requires administrator permission.
     Settings and the search index are preserved on upgrade and uninstall.
   EOS
 end

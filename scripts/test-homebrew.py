@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         desktop = data / "applications/io.github.FarisZR.GSeek.desktop"
         service = data / "dbus-1/services/io.github.FarisZR.GSeek.Service.service"
-        provider = data / "gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"
+        provider = Path("/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini")
         autostart = config / "autostart/io.github.FarisZR.GSeek.desktop"
         for path in [desktop, service, provider, autostart]:
             assert path.is_file(), path
