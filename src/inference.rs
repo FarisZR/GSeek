@@ -87,13 +87,8 @@ impl Runtime {
         }
     }
     pub fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
-        let result = self.embed_inner(input);
-        if result.is_err() {
-            // A closed pipe or timed-out request must not pin a dead worker to
-            // every subsequent query. Drop it; the next request starts afresh.
-            self.worker = None;
-        }
-        result.map_err(|e| InferenceError(format!("{e:#}")).into())
+        self.embed_inner(input)
+            .map_err(|e| InferenceError(format!("{e:#}")).into())
     }
     fn embed_inner(&mut self, input: &Input) -> Result<Vec<f32>> {
         self.last_used = Instant::now();
@@ -135,23 +130,32 @@ impl Runtime {
         if self.worker.is_none() {
             let mut failures = vec![];
             for backend in candidates(self.settings.backend) {
-                match Worker::start(&self.paths, &self.settings, self.query_only, backend) {
-                    Ok(worker) => {
+                let attempt: Result<_> = (|| {
+                    let mut worker =
+                        Worker::start(&self.paths, &self.settings, self.query_only, backend)?;
+                    let vector = worker.embed(input)?;
+                    Ok((worker, vector))
+                })();
+                match attempt {
+                    Ok((worker, vector)) => {
                         self.worker = Some(worker);
                         self.backend = format!("{backend:?}");
-                        break;
+                        return Ok(vector);
                     }
                     Err(e) => failures.push(format!("{backend:?}: {e:#}")),
                 }
             }
-            if self.worker.is_none() {
-                bail!("Cannot start EmbeddingGemma 2. {}", failures.join("\n"));
-            }
+            bail!("Cannot start EmbeddingGemma 2. {}", failures.join("\n"));
         }
         let result = self.worker.as_mut().unwrap().embed(input);
         if result.is_err() {
             self.worker = None;
             self.cache.clear();
+            if self.settings.backend == Backend::Auto {
+                // Try fresh workers, including CPU, if a growing GPU context
+                // no longer fits or its driver fails. Explicit choices report errors.
+                return self.embed_inner(input);
+            }
         }
         result
     }
@@ -471,6 +475,24 @@ mod tests {
         let actual = runtime.embed(&input)?;
         validate_vector(&actual)?;
         assert!(expected.iter().zip(actual).map(|(a, b)| a * b).sum::<f32>() > 0.999);
+        if runtime.settings.backend == Backend::Cpu {
+            // CPU jobs also exercise Automatic's transparent retry. Vulkan CI
+            // deliberately ships only its own backend, so it checks explicit errors above.
+            runtime.settings.backend = Backend::Auto;
+            let worker = runtime.worker.as_mut().unwrap();
+            worker.child.kill()?;
+            worker.child.wait()?;
+            let recovered = runtime.embed(&input)?;
+            validate_vector(&recovered)?;
+            assert!(
+                expected
+                    .iter()
+                    .zip(recovered)
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+                    > 0.999
+            );
+        }
         Ok(())
     }
     #[test]

@@ -746,6 +746,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                             return Ok(());
                         }
                         let vector = runtime.embed(&part.input)?;
+                        shared.lock().unwrap().backend = runtime.backend.clone();
                         ensure_current(&store, &file, &latest, &content)?;
                         store.checkpoint(
                             &content,
