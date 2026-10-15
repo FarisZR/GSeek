@@ -42,8 +42,7 @@ def render(version, url, arm_sha, intel_sha):
     run "/usr/bin/install",
         args: ["-D", "-m", "644", "{{{{staged_path}}}}/gseek-search-provider.ini",
                "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
-        sudo: true,
-        writable_paths: ["/usr/local/share/gnome-shell/search-providers"]
+        sudo: true
     write_file "~/.local/share/gseek-app/homebrew-prefix", "{{{{HOMEBREW_PREFIX}}}}\\n"
     run "~/.local/share/gseek-app/bin/gseek",
         args: ["integrate"],
