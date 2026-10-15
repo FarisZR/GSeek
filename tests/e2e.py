@@ -34,7 +34,10 @@ IFACE = "io.github.FarisZR.GSeek.Service1"
 SHELL_IFACE = "org.gnome.Shell.SearchProvider2"
 
 
-def wait_for(predicate, timeout=90):
+def wait_for(predicate, timeout=None):
+    if timeout is None:
+        # Software Vulkan on shared CI CPUs is much slower than native CPU inference.
+        timeout = 300 if os.environ.get("GSEEK_TEST_BACKEND") == "vulkan" else 90
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -81,7 +84,10 @@ class EndToEnd(unittest.TestCase):
         # Exercise service activation through its installed XDG .service file, not a manually started daemon.
         cls.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
         wait_for(lambda: cls.status()["ready"], timeout=300)
-        wait_for(lambda: cls.status()["counts"]["pending"] == 0 and cls.status()["counts"]["files"] >= 5)
+        try:
+            wait_for(lambda: cls.status()["counts"]["pending"] == 0 and cls.status()["counts"]["files"] >= 5)
+        except AssertionError as error:
+            raise AssertionError(f"Initial indexing did not finish: {cls.status()}") from error
 
     @classmethod
     def tearDownClass(cls):
