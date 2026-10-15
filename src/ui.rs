@@ -227,13 +227,20 @@ impl Window {
         current_file.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         current_file.set_wrap(false);
         activity_box.append(&current_file);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let buttons = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .min_children_per_line(1)
+            .max_children_per_line(3)
+            .column_spacing(8)
+            .row_spacing(8)
+            .halign(gtk::Align::Start)
+            .build();
         let pause = gtk::Button::with_label("Pause Indexing");
-        buttons.append(&pause);
+        buttons.insert(&pause, -1);
         let scan = gtk::Button::with_label("Index Now");
-        buttons.append(&scan);
+        buttons.insert(&scan, -1);
         let retry = gtk::Button::with_label("Retry Failed");
-        buttons.append(&retry);
+        buttons.insert(&retry, -1);
         activity_box.append(&buttons);
         let logs = gtk::ListBox::new();
         logs.add_css_class("boxed-list");
