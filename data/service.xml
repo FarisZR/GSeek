@@ -1,0 +1,8 @@
+<node><interface name="io.github.FarisZR.GSeek.Service1">
+ <method name="Status"><arg type="s" direction="out"/></method>
+ <method name="Settings"><arg type="s" direction="out"/></method>
+ <method name="Activity"><arg type="s" direction="out"/></method>
+ <method name="Configure"><arg type="s" direction="in"/></method>
+ <method name="Search"><arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="out"/></method>
+ <method name="Command"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+</interface></node>
