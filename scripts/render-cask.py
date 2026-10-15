@@ -29,11 +29,14 @@ def render(version, url, arm_sha, intel_sha):
   depends_on formula: %w[ffmpeg poppler libarchive]
 
   artifact "gseek", target: "~/.local/share/gseek-app"
-  artifact "gseek-search-provider.ini",
-           target: "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"
 
   postflight do
+    system_command "/usr/bin/install",
+                   args: ["-D", "-m", "644", (staged_path/"gseek-search-provider.ini").to_s,
+                          "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
+                   sudo: true,
+                   must_succeed: true
     bundle = Pathname.new(Dir.home)/".local/share/gseek-app"
     (bundle/"homebrew-prefix").write("#{{HOMEBREW_PREFIX}}\\n")
     system_command bundle/"bin/gseek",
@@ -45,7 +48,8 @@ def render(version, url, arm_sha, intel_sha):
     executable: "#{{Dir.home}}/.local/share/gseek-app/bin/gseek",
     args: ["unintegrate"],
     sudo: false,
-  }}
+  }},
+  delete: "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"
 
   caveats <<~EOS
     Open GSeek from your application menu to finish setup. The model downloads
