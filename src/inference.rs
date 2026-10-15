@@ -278,9 +278,15 @@ impl Worker {
             .open(&log_path)?;
         cmd.env(
             "LD_LIBRARY_PATH",
-            std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
-                &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
-            )))?,
+            std::env::join_paths(
+                std::iter::once(dir.clone())
+                    .chain(std::env::split_paths(
+                        &std::env::var_os("GSEEK_RUNTIME_LIBRARY_PATH").unwrap_or_default(),
+                    ))
+                    .chain(std::env::split_paths(
+                        &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+                    )),
+            )?,
         )
         .stdin(Stdio::null())
         .stdout(Stdio::null())

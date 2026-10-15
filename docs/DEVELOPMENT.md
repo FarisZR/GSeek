@@ -14,7 +14,9 @@ cargo run -- prepare-model
 ```
 
 `prepare-model` downloads and verifies the real 865 MB model. First inference
-automatically installs the selected official prebuilt llama.cpp runtime. No
+automatically installs the selected official prebuilt llama.cpp runtime. Install
+`openssl3-libs` on Fedora or `libssl3t64` on Ubuntu for that runtime; the Homebrew
+cask supplies `openssl@3` automatically. No
 inference compilation, GPU SDK, or manually configured server is needed.
 
 The embedded `data/runtimes.json` pins official release URLs, byte sizes, and

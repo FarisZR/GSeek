@@ -5,6 +5,7 @@ bundle=$(cd "$(dirname "$self")/.." && pwd)
 if [[ -f "$bundle/homebrew-prefix" ]]; then
   IFS= read -r brew_prefix < "$bundle/homebrew-prefix"
   export PATH="$brew_prefix/bin:$PATH"
+  export GSEEK_RUNTIME_LIBRARY_PATH="$brew_prefix/opt/openssl@3/lib"
 fi
 export GSEEK_LAUNCHER="$self"
 exec "$bundle/bin/gseek-native" "$@"
