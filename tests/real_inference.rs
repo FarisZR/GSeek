@@ -18,6 +18,41 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
+#[ignore = "Uses the native media reader; verifies local playlists cannot initiate network requests"]
+fn media_readers_do_not_follow_network_playlists() -> Result<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let directory = tempfile::Builder::new()
+        .prefix("gseek-playlist-")
+        .tempdir()?;
+    let playlist = directory.path().join("recording.m3u8");
+    fs::write(
+        &playlist,
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10,\nhttp://{}/private.ts\n#EXT-X-ENDLIST\n",
+            listener.local_addr()?
+        ),
+    )?;
+    let settings = Settings {
+        folders: vec![directory.path().into()],
+        audio_video: true,
+        ..Default::default()
+    };
+    let file = gseek::discovery::record_from_uri(
+        url::Url::from_file_path(&playlist).unwrap().as_str(),
+        &settings,
+    )?
+    .unwrap();
+    let result = gseek::extract::read(&file, &settings, directory.path(), |_| Ok(()));
+    assert!(result.is_err(), "A remote playlist must be rejected");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "A media reader initiated a network connection"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "Downloads/loads 865 MB of real model weights; run with --ignored"]
 fn text_matches_pinned_reference_vector() -> Result<()> {
     let paths = Paths::from_env();

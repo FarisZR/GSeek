@@ -14,6 +14,14 @@ pub const READER_VERSION: &str = "readers-1";
 pub const TEXT_CHARS: usize = 3200;
 pub const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
 
+fn media_command(name: &str) -> Command {
+    let mut command = Command::new(tool(name));
+    // Probing a local file can otherwise follow a playlist to a network URL.
+    // Indexing media must never initiate its own network requests.
+    command.args(["-protocol_whitelist", "file,pipe"]);
+    command
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Input {
@@ -296,7 +304,7 @@ pub fn read(
             bail!("Audio and video indexing is disabled");
         }
         let info = run_output(
-            Command::new(tool("ffprobe"))
+            media_command("ffprobe")
                 .args([
                     "-v",
                     "error",
@@ -324,7 +332,7 @@ pub fn read(
             for start in (0..duration.ceil() as u64).step_by(25) {
                 let output = temp.path().join("window.wav");
                 run_output(
-                    Command::new(tool("ffmpeg"))
+                    media_command("ffmpeg")
                         .args([
                             "-nostdin",
                             "-v",
@@ -382,7 +390,7 @@ pub fn read(
 }
 
 fn ffmpeg_image(input: &Path, output: &Path, seconds: Option<u64>, temp: &Path) -> Result<()> {
-    let mut cmd = Command::new(tool("ffmpeg"));
+    let mut cmd = media_command("ffmpeg");
     cmd.args(["-nostdin", "-v", "error", "-y"]);
     if let Some(s) = seconds {
         cmd.args(["-ss", &s.to_string()]);
