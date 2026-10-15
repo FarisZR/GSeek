@@ -109,6 +109,23 @@ impl Store {
         )?)
     }
 
+    pub fn activate_pipeline(&self, pipeline: &str) -> Result<()> {
+        let old: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM metadata WHERE key='pipeline'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if old.as_deref() != Some(pipeline) {
+            self.conn.execute(
+                "UPDATE files SET state='pending' WHERE folder=0 AND state='indexed'",
+                [],
+            )?;
+            self.conn.execute("INSERT INTO metadata VALUES('pipeline',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[pipeline])?;
+        }
+        Ok(())
+    }
+
     pub fn discover(&self, file: &FileRecord, generation: i64) -> Result<()> {
         self.conn.execute("INSERT INTO files(uri,path,name,mime,folded,stamp,size,folder,seen,state)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -318,6 +335,7 @@ impl Store {
         validate_vector(vector)?;
         let limit = limit.clamp(1, 200);
         let mut hits = HashMap::<String, SearchHit>::new();
+        let mut best_semantic = 0.0_f64;
         // Bound candidates, but preserve AND matching for filenames/paths.
         let mut sql = "SELECT uri,path,name,mime FROM files WHERE ".to_owned();
         for i in 0..terms.len() {
@@ -377,6 +395,10 @@ impl Store {
                 if score < 0.30 || !score.is_finite() {
                     continue;
                 }
+                let path: String = r.get(1)?;
+                if settings.allows(Path::new(&path)) {
+                    best_semantic = best_semantic.max(score);
+                }
                 if hits.len() >= limit * 4
                     && !hits.contains_key(&r.get::<_, String>(0)?)
                     && let Some((_, lowest)) =
@@ -401,6 +423,10 @@ impl Store {
             }
         }
         let mut hits: Vec<_> = hits.into_values().collect();
+        // EmbeddingGemma's unrelated document pairs can still have positive cosine scores.
+        // Preserve lexical hits, but omit weak semantic neighbours rather than filling the view.
+        let cutoff = (best_semantic - 0.12).max(0.60);
+        hits.retain(|h| h.score >= 2.0 || h.score >= cutoff);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
         hits.truncate(limit);
         Ok(hits)
@@ -573,6 +599,20 @@ mod tests {
                 .search("concept", &v, "different-model", &s, 20)?
                 .is_empty()
         );
+        Ok(())
+    }
+    #[test]
+    fn changing_the_pipeline_requeues_content_without_deleting_metadata() -> Result<()> {
+        let (_d, mut store, _s, f) = fixture()?;
+        store.activate_pipeline("old")?;
+        store.discover(&f, 1)?;
+        store.save_content("h", "old", &[])?;
+        store.complete(&f.uri, "h")?;
+        store.activate_pipeline("old")?;
+        assert_eq!(store.counts()?.pending, 0);
+        store.activate_pipeline("new")?;
+        assert_eq!(store.counts()?.pending, 1);
+        assert!(store.file(&f.uri)?.is_some());
         Ok(())
     }
     #[test]

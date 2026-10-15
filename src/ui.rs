@@ -162,12 +162,9 @@ impl Window {
         let breakpoint =
             adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 600px").unwrap());
         breakpoint.add_setter(&switcher, "visible", Some(&false.to_value()));
+        breakpoint.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
         window.add_breakpoint(breakpoint);
         switcher_bar.set_reveal(false);
-        let narrow =
-            adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 600px").unwrap());
-        narrow.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
-        window.add_breakpoint(narrow);
 
         let search_box = vertical(16);
         margins(&search_box, 24);
@@ -189,6 +186,7 @@ impl Window {
             .description("Try “the clause about pets”, “a photo of the beach”,\nor describe a file in English, German, or Arabic.").build();
         result_stack.add_named(&result_state, Some("message"));
         let results = gtk::ListBox::new();
+        results.set_valign(gtk::Align::Start);
         results.add_css_class("boxed-list");
         results.set_selection_mode(gtk::SelectionMode::Single);
         let scroll = gtk::ScrolledWindow::builder()
@@ -529,7 +527,11 @@ impl Window {
     }
 
     fn append_hit(&self, hit: &SearchHit) {
-        let location = hit.path.parent().unwrap_or(&hit.path).to_string_lossy();
+        let location = self
+            .paths
+            .load()
+            .map(|s| s.location_label(hit.path.parent().unwrap_or(&hit.path)))
+            .unwrap_or_else(|_| hit.path.to_string_lossy().into_owned());
         let suffix = if let Some(page) = hit.page {
             format!(" · Page {page}")
         } else if let Some(s) = hit.seconds {
@@ -589,6 +591,7 @@ impl Window {
         fill_folders(&folder_list, &draft, false, self);
         locations.add(&folder_list);
         let add = gtk::Button::with_label("Add Folder…");
+        add.set_valign(gtk::Align::Center);
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folder_list, &draft, false, self);
         let scope = adw::ActionRow::builder()
@@ -602,7 +605,7 @@ impl Window {
                 .arg("search")
                 .spawn();
         });
-        locations.add(&scope);
+
         page.add(&locations);
         let exclusions = adw::PreferencesGroup::builder()
             .title("Excluded Folders")
@@ -613,6 +616,7 @@ impl Window {
         fill_folders(&exclude_list, &draft, true, self);
         exclusions.add(&exclude_list);
         let exclude = gtk::Button::with_label("Exclude Folder…");
+        exclude.set_valign(gtk::Align::Center);
         exclusions.set_header_suffix(Some(&exclude));
         connect_folder_picker(&exclude, &self.window, &exclude_list, &draft, true, self);
         page.add(&exclusions);
@@ -643,9 +647,10 @@ impl Window {
             .subtitle(
                 "Enable GSeek and disable the Files search provider. LocalSearch keeps running.",
             )
-            .active(first_run)
+            .active(first_run || draft.borrow().search_enabled)
             .build();
         integration_group.add(&replace);
+        integration_group.add(&scope);
         page.add(&integration_group);
         let apply_group = adw::PreferencesGroup::new();
         let apply = gtk::Button::with_label(if first_run {
@@ -820,7 +825,7 @@ impl Window {
                 return;
             }
             button.set_sensitive(false);
-            let enable = replace.is_active();
+            settings.search_enabled = replace.is_active();
             let paths = ui.paths.clone();
             let weak = Rc::downgrade(&ui);
             let close = close.clone();
@@ -828,15 +833,11 @@ impl Window {
             spawn(
                 move || {
                     integration::install(&paths, &service::launcher()?)?;
-                    // Save before D-Bus activation so first-run startup sees exactly this configuration.
-                    paths.save(&settings)?;
                     service::call(
                         "Configure",
                         Some(&(serde_json::to_string(&settings)?,).to_variant()),
                     )?;
-                    if enable {
-                        service::command("enable-search", "")?;
-                    }
+
                     Ok(())
                 },
                 move |result| {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // GSeek's isolated EmbeddingGemma 2 worker. One normalized embedding per request.
 // The parent owns process deadlines and can kill a stuck driver without taking down search or GTK.
 #include "llama.h"

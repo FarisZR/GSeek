@@ -78,6 +78,7 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
     let data = xdg("XDG_DATA_HOME", ".local/share");
     let config = xdg("XDG_CONFIG_HOME", ".config");
     let exec = desktop_quote(launcher)?;
+    let dbus_exec = exec.replace("%%", "%");
     let mut manifest = load(paths)?;
     let registrations = [
         (
@@ -88,7 +89,7 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
         ),
         (
             data.join(format!("dbus-1/services/{BUS_NAME}.service")),
-            format!("[D-BUS Service]\nName={BUS_NAME}\nExec={exec} service\n"),
+            format!("[D-BUS Service]\nName={BUS_NAME}\nExec={dbus_exec} service\n"),
         ),
         (
             data.join(format!("gnome-shell/search-providers/{APP_ID}.ini")),
@@ -180,9 +181,9 @@ pub fn enable_search(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall(paths: &Paths) -> Result<()> {
-    let manifest = load(paths)?;
-    if let Some(previous) = manifest.search {
+pub fn disable_search(paths: &Paths) -> Result<()> {
+    let mut manifest = load(paths)?;
+    if let Some(previous) = manifest.search.take() {
         let settings = search_settings()?;
         let mut disabled: Vec<String> = settings
             .strv("disabled")
@@ -210,6 +211,13 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         settings.apply();
         gio::Settings::sync();
     }
+    save(paths, &manifest)?;
+    Ok(())
+}
+
+pub fn uninstall(paths: &Paths) -> Result<()> {
+    disable_search(paths)?;
+    let manifest = load(paths)?;
     for (path, hash) in manifest.files {
         if path.exists() && digest(&fs::read(&path)?) == hash {
             fs::remove_file(path)?;
@@ -259,6 +267,56 @@ pub fn open_result(paths: &Paths, uri: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacing_files_search_restores_only_owned_settings() -> Result<()> {
+        if std::env::var("GSETTINGS_BACKEND").as_deref() != Ok("memory") {
+            return Ok(());
+        }
+        let d = tempfile::tempdir()?;
+        let paths = Paths {
+            data: d.path().join("data"),
+            config: d.path().join("config"),
+            cache: d.path().join("cache"),
+        };
+        paths.init()?;
+        let settings = search_settings()?;
+        settings.set_strv("disabled", ["org.example.Before.desktop"])?;
+        settings.set_strv("enabled", ["org.example.Enabled.desktop"])?;
+        enable_search(&paths)?;
+        enable_search(&paths)?;
+        assert!(
+            settings
+                .strv("disabled")
+                .iter()
+                .any(|s| s == FILES_PROVIDER)
+        );
+        settings.set_strv(
+            "disabled",
+            [
+                "org.example.Before.desktop",
+                FILES_PROVIDER,
+                "org.example.Added.desktop",
+            ],
+        )?;
+        disable_search(&paths)?;
+        assert_eq!(
+            settings
+                .strv("disabled")
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["org.example.Before.desktop", "org.example.Added.desktop"]
+        );
+        assert_eq!(
+            settings
+                .strv("enabled")
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["org.example.Enabled.desktop"]
+        );
+        Ok(())
+    }
     #[test]
     fn launcher_is_escaped_for_desktop_entry_without_a_shell() {
         assert_eq!(

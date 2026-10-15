@@ -16,8 +16,8 @@ elif command -v dnf >/dev/null; then
   dnf install -y gcc gcc-c++ pkgconf-pkg-config curl ca-certificates git \
     gtk4-devel libadwaita-devel tinysparql-devel python3-gobject python3-cairo \
     dbus-daemon dbus-x11 xorg-x11-server-Xvfb xorg-x11-xauth cmake ninja-build \
-    vulkan-headers vulkan-loader-devel glslc spirv-headers mesa-vulkan-drivers vulkan-tools \
-    poppler-utils ffmpeg-free libarchive gnome-shell gsettings-desktop-schemas \
+    vulkan-headers vulkan-loader-devel glslc spirv-headers-devel mesa-vulkan-drivers vulkan-tools \
+    poppler-utils ffmpeg-free libarchive bsdtar gnome-shell gsettings-desktop-schemas \
     adwaita-icon-theme google-noto-sans-fonts google-noto-sans-arabic-fonts
 else
   echo 'Unsupported CI image' >&2; exit 1

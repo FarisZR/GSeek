@@ -144,12 +144,9 @@ pub fn run(paths: Paths) -> Result<()> {
                                         if let Some(icon) = icon.serialize() {
                                             meta.insert("icon".into(), icon);
                                         }
-                                        let description = file
-                                            .path
-                                            .parent()
-                                            .unwrap_or(&file.path)
-                                            .to_string_lossy()
-                                            .to_string();
+                                        let description = settings.location_label(
+                                            file.path.parent().unwrap_or(&file.path),
+                                        );
                                         meta.insert("description".into(), description.to_variant());
                                         metas.push(meta);
                                     }
@@ -223,8 +220,13 @@ pub fn run(paths: Paths) -> Result<()> {
                                 if json.len() > 65536 {
                                     bail!("Configuration is too large");
                                 }
-                                let settings: Settings = serde_json::from_str(&json)?;
+                                let mut settings: Settings = serde_json::from_str(&json)?;
+                                settings.configured = true;
                                 paths.save(&settings)?;
+                                if !settings.search_enabled {
+                                    integration::disable_search(&paths)?;
+                                }
+                                state.lock().unwrap().ready = false;
                                 state.lock().unwrap().paused = settings.paused;
                                 tx.send(Command::Setup)?;
                                 Ok(None)
@@ -276,7 +278,20 @@ pub fn run(paths: Paths) -> Result<()> {
                                             Some(argument.into())
                                         }))?
                                     }
-                                    "enable-search" => integration::enable_search(&paths)?,
+                                    "enable-search" => {
+                                        let mut s = paths.load()?;
+                                        s.search_enabled = true;
+                                        paths.save(&s)?;
+                                        if state.lock().unwrap().ready {
+                                            integration::enable_search(&paths)?;
+                                        }
+                                    }
+                                    "disable-search" => {
+                                        let mut s = paths.load()?;
+                                        s.search_enabled = false;
+                                        paths.save(&s)?;
+                                        integration::disable_search(&paths)?;
+                                    }
                                     "quit" => {
                                         tx.send(Command::Quit)?;
                                         shutdown.quit();
@@ -502,8 +517,20 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 status(shared, "setup", "Checking EmbeddingGemma 2");
                 let mut runtime = Runtime::new(paths, &settings, false);
                 runtime.validate()?;
-                settings.configured = true;
-                paths.save(&settings)?;
+                let latest = paths.load()?;
+                if latest.backend != settings.backend
+                    || latest.external != settings.external
+                    || latest.rocm_override != settings.rocm_override
+                {
+                    bail!(
+                        "Inference settings changed; restarting setup with the new configuration"
+                    );
+                }
+                settings = latest;
+                store.activate_pipeline(&runtime.fingerprint())?;
+                if settings.search_enabled {
+                    integration::enable_search(paths)?;
+                }
                 Ok(runtime)
             })();
             match initialized {
@@ -524,7 +551,9 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
         if !settings.configured && !setup {
             status(shared, "welcome", "Open GSeek to set up semantic search");
         } else if runtime.is_some() && !setup {
-            if scan || last_scan.elapsed() >= Duration::from_secs(300) {
+            if (scan && last_scan.elapsed() >= Duration::from_secs(2))
+                || last_scan.elapsed() >= Duration::from_secs(300)
+            {
                 // Coalesce LocalSearch's burst of GraphUpdated signals into one reconciliation.
                 scan = false;
                 status(
@@ -555,6 +584,10 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
             if !settings.paused
                 && let Some(file) = store.next_pending()?
             {
+                if let Some(reason) = extract::skip_reason(&file, &settings) {
+                    store.mark(&file.uri, "skipped", &reason)?;
+                    continue;
+                }
                 shared.lock().unwrap().current = file.path.to_string_lossy().into_owned();
                 status(shared, "indexing", format!("Reading {}", file.name));
                 let result = (|| -> Result<()> {
@@ -587,7 +620,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                         .context("File was removed during indexing")?;
                     if current.stamp != file.stamp {
                         store.discover(&current, store.start_scan()?)?;
-                        bail!("File changed during indexing; it will be retried");
+                        return Ok(());
                     }
                     if chunks.is_empty() {
                         bail!("No searchable content was found");
@@ -596,10 +629,21 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     store.complete(&file.uri, &content)?;
                     Ok(())
                 })();
+                let paused = shared.lock().unwrap().paused;
                 if let Err(e) = result
-                    && !shared.lock().unwrap().paused
+                    && !paused
                 {
-                    store.mark(&file.uri, "failed", &format!("{e:#}"))?;
+                    if e.downcast_ref::<crate::inference::InferenceError>()
+                        .is_some()
+                    {
+                        status(shared, "error", format!("{e:#}"));
+                        shared.lock().unwrap().ready = false;
+                        store.log(&file.uri, "failed", &format!("{e:#}"))?;
+                        setup = true;
+                        backoff = Instant::now() + Duration::from_secs(30);
+                    } else {
+                        store.mark(&file.uri, "failed", &format!("{e:#}"))?;
+                    }
                 }
                 shared.lock().unwrap().counts = store.counts()?;
                 continue;
@@ -652,6 +696,22 @@ pub fn call(method: &str, parameters: Option<&glib::Variant>) -> Result<glib::Va
         120000,
         gio::Cancellable::NONE,
     )?)
+}
+
+pub fn stop_running() {
+    if let Ok(connection) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        let _ = connection.call_sync(
+            Some(BUS_NAME),
+            CONTROL_PATH,
+            CONTROL_IFACE,
+            "Command",
+            Some(&("quit", "").to_variant()),
+            None,
+            gio::DBusCallFlags::NO_AUTO_START,
+            2000,
+            gio::Cancellable::NONE,
+        );
+    }
 }
 pub fn read_status() -> Result<Status> {
     let value = call("Status", None)?;

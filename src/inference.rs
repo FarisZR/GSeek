@@ -26,6 +26,15 @@ pub struct Runtime {
     last_used: Instant,
 }
 
+#[derive(Debug)]
+pub struct InferenceError(pub String);
+impl std::fmt::Display for InferenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for InferenceError {}
+
 impl Runtime {
     pub fn new(paths: &Paths, settings: &Settings, query_only: bool) -> Self {
         Self {
@@ -49,7 +58,15 @@ impl Runtime {
         }
     }
     pub fn validate(&mut self) -> Result<()> {
-        self.query("GSeek model compatibility check")?;
+        let vector = self.query("the clause about pets in the lease")?;
+        let reference: Vec<f32> =
+            serde_json::from_str(include_str!("../data/reference-embedding.json"))?;
+        let cosine: f32 = vector.iter().zip(reference).map(|(a, b)| a * b).sum();
+        if cosine < 0.995 {
+            bail!(
+                "The inference engine's vectors do not match EmbeddingGemma 2 (compatibility cosine {cosine:.4}). Check its model weights, task prompts, mean pooling, and normalization."
+            );
+        }
         Ok(())
     }
     pub fn query(&mut self, text: &str) -> Result<Vec<f32>> {
@@ -70,6 +87,10 @@ impl Runtime {
         }
     }
     pub fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
+        self.embed_inner(input)
+            .map_err(|e| InferenceError(format!("{e:#}")).into())
+    }
+    fn embed_inner(&mut self, input: &Input) -> Result<Vec<f32>> {
         self.last_used = Instant::now();
         if let Some(e) = &self.settings.external {
             let url = e.validate()?;
@@ -146,14 +167,16 @@ pub fn candidates(selected: Backend) -> Vec<Backend> {
     result
 }
 
-pub fn runtime_directory(backend: Backend) -> Result<PathBuf> {
+pub fn runtime_directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
     let name = format!("{backend:?}").to_lowercase();
     if let Some(dir) = std::env::var_os("GSEEK_RUNTIME_DIR") {
         let dir = PathBuf::from(dir);
         if dir.join(&name).is_dir() {
             return Ok(dir.join(name));
         }
-        return Ok(dir);
+        if dir.join("gseek-inference").is_file() {
+            return Ok(dir);
+        }
     }
     let exe = std::env::current_exe()?;
     let prefix = exe.parent().context("Missing executable directory")?;
@@ -166,7 +189,66 @@ pub fn runtime_directory(backend: Backend) -> Result<PathBuf> {
             return Ok(dir);
         }
     }
-    bail!("The {name} runtime is not installed. Reinstall GSeek or choose another backend.")
+    install_runtime(paths, &name)
+}
+
+#[derive(serde::Deserialize)]
+struct RuntimeManifest {
+    version: u32,
+    assets: std::collections::BTreeMap<String, std::collections::BTreeMap<String, RuntimeAsset>>,
+}
+#[derive(serde::Deserialize)]
+struct RuntimeAsset {
+    url: String,
+    sha256: String,
+    bytes: u64,
+}
+
+fn install_runtime(paths: &Paths, backend: &str) -> Result<PathBuf> {
+    let manifest = std::env::var_os("GSEEK_RUNTIME_MANIFEST").context(
+        "This development build has no managed runtime manifest; use scripts/build-inference.sh",
+    )?;
+    let manifest: RuntimeManifest = serde_json::from_slice(&fs::read(manifest)?)?;
+    if manifest.version != 1 {
+        bail!("Unsupported runtime manifest; reinstall GSeek");
+    }
+    let asset=manifest.assets.get(backend).and_then(|a|a.get(std::env::consts::ARCH))
+        .with_context(||format!("The {backend} backend is not distributed for this architecture; choose Automatic or Vulkan"))?;
+    let prefix = format!(
+        "https://github.com/FarisZR/GSeek/releases/download/v{}/",
+        env!("CARGO_PKG_VERSION")
+    );
+    if !asset.url.starts_with(&prefix)
+        || asset.sha256.len() != 64
+        || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        bail!("Invalid managed runtime metadata");
+    }
+    let root = paths.data.join("runtimes");
+    fs::create_dir_all(&root)?;
+    let dest = root.join(format!("{backend}-{}", &asset.sha256[..16]));
+    if dest.join("gseek-inference").is_file() {
+        return Ok(dest);
+    }
+    let archive = root.join(format!("{backend}-{}.tar.gz", &asset.sha256[..16]));
+    model::download_verified(&asset.url, &archive, asset.bytes, &asset.sha256, |_, _| {
+        Ok(())
+    })?;
+    let temp = tempfile::tempdir_in(&root)?;
+    let status = Command::new(crate::extract::tool("bsdtar"))
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(temp.path())
+        .args(["--no-same-owner", "--no-same-permissions"])
+        .stdin(Stdio::null())
+        .status()?;
+    if !status.success() || !temp.path().join(backend).join("gseek-inference").is_file() {
+        bail!("Cannot unpack the verified {backend} runtime");
+    }
+    fs::rename(temp.path().join(backend), &dest)?;
+    fs::remove_file(archive)?;
+    Ok(dest)
 }
 
 struct Worker {
@@ -182,7 +264,7 @@ impl Worker {
         query_only: bool,
         backend: Backend,
     ) -> Result<Self> {
-        let dir = runtime_directory(backend)?;
+        let dir = runtime_directory(paths, backend)?;
         let models = paths.data.join("models");
         for file in if query_only {
             &model::FILES[..1]
@@ -238,7 +320,12 @@ impl Worker {
                     .unwrap_or(2)
                     .to_string(),
             )
-            .env("LD_LIBRARY_PATH", &dir)
+            .env(
+                "LD_LIBRARY_PATH",
+                std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
+                    &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+                )))?,
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);
@@ -246,6 +333,15 @@ impl Worker {
             && let Some(v) = &settings.rocm_override
         {
             cmd.env("HSA_OVERRIDE_GFX_VERSION", v);
+        }
+        if backend == Backend::Rocm {
+            cmd.env("ROCBLAS_TENSILE_LIBPATH", dir.join("rocblas/library"));
+        }
+        if backend == Backend::Vulkan
+            && !std::path::Path::new("/dev/dri").exists()
+            && std::env::var_os("GGML_VK_VISIBLE_DEVICES").is_none()
+        {
+            cmd.env("GGML_VK_VISIBLE_DEVICES", "0");
         }
         let mut child = cmd
             .spawn()
@@ -274,7 +370,19 @@ impl Worker {
             output,
             next_id: 0,
         };
-        let hello = worker.receive(Duration::from_secs(90))?;
+        let hello = worker.receive(Duration::from_secs(90)).with_context(|| {
+            let log = fs::read_to_string(paths.data.join("inference.log")).unwrap_or_default();
+            let tail = log
+                .lines()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("Managed runtime did not become ready. {tail}")
+        })?;
         if hello["ready"] != true
             || hello["model"] != "google/embeddinggemma-2"
             || hello["dimensions"] != DIMENSIONS
@@ -297,7 +405,12 @@ impl Worker {
         serde_json::to_writer(&mut self.input, &json!({"id":self.next_id,"input":input}))?;
         self.input.write_all(b"\n")?;
         self.input.flush()?;
-        let response = self.receive(Duration::from_secs(60))?;
+        let timeout = std::env::var("GSEEK_INFERENCE_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(1, 600);
+        let response = self.receive(Duration::from_secs(timeout))?;
         if let Some(error) = response["error"].as_str() {
             bail!("Embedding failed: {error}");
         }

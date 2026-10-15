@@ -29,4 +29,12 @@ mkdir -p "$out"
 cp "build/inference-$backend/gseek-inference" "$out/"
 cp -a "build/inference-$backend/bin/"*.so* "$out/"
 cp "$source_dir/LICENSE" "$out/llama.cpp-LICENSE"
+cp inference/LICENSE "$out/GSeek-helper-LICENSE"
+mkdir -p "$out/notices"
+find "$source_dir/vendor" "$source_dir/ggml" -type f \( -iname '*license*' -o -iname '*copying*' \) -print0 |
+  while IFS= read -r -d '' notice; do
+    relative="${notice#"$source_dir/"}"
+    mkdir -p "$out/notices/$(dirname "$relative")"
+    cp "$notice" "$out/notices/$relative"
+  done
 printf '%s\n' "$commit" > "$out/llama.cpp-COMMIT"

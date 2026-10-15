@@ -75,6 +75,7 @@ jobs:
           XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
           XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
           GSEEK_RUNTIME_DIR: ${{ github.workspace }}/dist/runtime
+          GSEEK_INFERENCE_TIMEOUT: '300'
         run: |
           set -euo pipefail
           mkdir -p "$XDG_CONFIG_HOME/gseek" artifacts
@@ -111,9 +112,12 @@ jobs:
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           brew update
-          brew install libadwaita tinysparql ffmpeg poppler libarchive pkgconf
+          brew install ffmpeg poppler libarchive
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config xvfb xauth dbus-x11
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG=/usr/bin/pkg-config" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/$(gcc -dumpmachine)/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -121,7 +125,7 @@ jobs:
             ~/.cargo/git
             target
           key: brew-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
-      - name: Build the native application with Homebrew libraries
+      - name: Build the native application and test its cask
         shell: bash
         run: |
           rustup toolchain install 1.99.0 --profile minimal

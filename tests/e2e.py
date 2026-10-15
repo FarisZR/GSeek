@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -135,6 +136,17 @@ class EndToEnd(unittest.TestCase):
         refined = self.invoke("GetSubsearchResultSet", GLib.Variant("(asas)", (ids, ["pets", "in", "lease"])), SHELL_IFACE, PROVIDER)[0]
         self.assertTrue(refined)
 
+    def test_02b_activating_a_result_uses_its_default_application(self):
+        helper=ROOT / "capture-open.py"
+        output=ROOT / "opened.json"
+        helper.write_text("import json,sys\nfrom pathlib import Path\n" + f"Path({str(output)!r}).write_text(json.dumps(sys.argv[1:]))\n")
+        app=Gio.AppInfo.create_from_commandline(f'{sys.executable} "{helper}" %u',"GSeek test reader",Gio.AppInfoCreateFlags.SUPPORTS_URIS)
+        app.set_as_default_for_type("text/plain")
+        uri=(self.docs / "Rental Agreement.txt").as_uri()
+        self.invoke("ActivateResult",GLib.Variant("(sasu)",(uri,["pets"],0)),SHELL_IFACE,PROVIDER)
+        wait_for(output.exists)
+        self.assertTrue(any(Gio.File.new_for_commandline_arg(arg).equal(Gio.File.new_for_uri(uri)) for arg in json.loads(output.read_text())))
+
     def test_03_pause_persists_and_resume_processes_new_files(self):
         self.command("pause")
         self.assertTrue(self.status()["paused"])
@@ -190,13 +202,20 @@ class EndToEnd(unittest.TestCase):
         subprocess.run([BINARY, "integrate"], env=env, check=True)
         desktop = root / "data/applications/io.github.FarisZR.GSeek.desktop"
         desktop.write_text(desktop.read_text() + "# User customization\n")
-        # No uninstall command here: its Quit would stop the shared test bus service.
         manifest = json.loads((root / "config/gseek/integration.json").read_text())
         self.assertIn(str(desktop), manifest["files"])
+        sentinel=root / "data/gseek/preserve.txt"
+        sentinel.write_text("Keep indexed data")
+        subprocess.run([BINARY,"unintegrate"],env=env,check=True)
+        self.assertTrue(desktop.is_file(),"User-edited registration must be preserved")
+        self.assertTrue(sentinel.is_file())
+        self.assertFalse((root / "data/dbus-1/services/io.github.FarisZR.GSeek.Service.service").exists())
+        wait_for(lambda:self.status()["ready"])
 
     def test_08_native_gtk_views(self):
         if os.environ.get("GSEEK_GUI_TEST_COMMAND"):
             subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
+            self.assertTrue(self.status()["ready"],"Closing the GTK window must not stop the background service")
         else:
             self.skipTest("Run under Xvfb or GNOME with GSEEK_GUI_TEST_COMMAND to capture native views")
 

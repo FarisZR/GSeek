@@ -42,13 +42,17 @@ pub fn agent(timeout: Duration, redirects: u32) -> ureq::Agent {
 }
 
 pub fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
+    verify_download(path, file.bytes, file.sha256)
+}
+
+pub fn verify_download(path: &Path, bytes: u64, sha256: &str) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
     }
-    if fs::metadata(path)?.len() != file.bytes {
+    if fs::metadata(path)?.len() != bytes {
         return Ok(false);
     }
-    Ok(content_hash(path)? == file.sha256)
+    Ok(content_hash(path)? == sha256)
 }
 
 pub fn ensure(paths: &Paths, mut progress: impl FnMut(&str, u64, u64) -> Result<()>) -> Result<()> {
@@ -63,70 +67,102 @@ pub fn ensure(paths: &Paths, mut progress: impl FnMut(&str, u64, u64) -> Result<
         if dest.exists() {
             fs::remove_file(&dest)?;
         }
-        let partial = models.join(format!("{}.part", file.name));
-        let mut offset = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-        if offset >= file.bytes {
-            fs::remove_file(&partial)?;
-            offset = 0;
-        }
         let url = format!(
             "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/{REVISION}/{}",
             file.name
         );
-        let client = agent(Duration::from_secs(3600), 8);
-        let request = client.get(&url).header("User-Agent", "GSeek/0.1");
-        let request = if offset > 0 {
-            request.header("Range", format!("bytes={offset}-"))
-        } else {
-            request
-        };
-        let mut response = request.call().context(
-            "Cannot download EmbeddingGemma 2. Check your connection and choose Retry Setup.",
-        )?;
-        if response.status() == 200 {
-            offset = 0;
-        } else if response.status() == 206 {
-            let expected = format!("bytes {offset}-");
-            if !response
-                .headers()
-                .get("Content-Range")
-                .and_then(|h| h.to_str().ok())
-                .is_some_and(|s| s.starts_with(&expected))
-            {
-                bail!("Model server returned an invalid download range");
-            }
-        } else {
-            bail!("Model server returned {}", response.status());
-        }
-        let mut output = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(offset == 0)
-            .append(offset > 0)
-            .mode(0o600)
-            .open(&partial)?;
-        let mut reader = response.body_mut().as_reader();
-        let mut buffer = [0; 65536];
-        loop {
-            progress(file.name, offset, file.bytes)?;
-            let n = reader.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            offset += n as u64;
-            if offset > file.bytes {
-                bail!("Model download exceeds its expected size");
-            }
-            output.write_all(&buffer[..n])?;
-        }
-        output.sync_all()?;
-        drop(output);
-        if !verify(&partial, file)? {
-            fs::remove_file(partial)?;
-            bail!("Model checksum did not match. Retry Setup to download a verified copy.");
-        }
-        fs::rename(partial, dest)?;
+        download_verified(&url, &dest, file.bytes, file.sha256, |done, total| {
+            progress(file.name, done, total)
+        })?;
     }
+    Ok(())
+}
+
+pub fn download_verified(
+    url: &str,
+    dest: &Path,
+    bytes: u64,
+    sha256: &str,
+    mut progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<()> {
+    if bytes == 0
+        || bytes > 2 * 1024 * 1024 * 1024
+        || sha256.len() != 64
+        || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        bail!("Invalid download metadata");
+    }
+    if verify_download(dest, bytes, sha256)? {
+        return Ok(());
+    }
+    let partial = dest.with_file_name(format!(
+        "{}.part",
+        dest.file_name()
+            .context("Download destination needs a filename")?
+            .to_string_lossy()
+    ));
+    if verify_download(&partial, bytes, sha256)? {
+        fs::rename(partial, dest)?;
+        return Ok(());
+    }
+    let mut offset = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+    if offset >= bytes {
+        fs::remove_file(&partial)?;
+        offset = 0;
+    }
+    let client = agent(Duration::from_secs(3600), 8);
+    let request = client.get(url).header("User-Agent", "GSeek/0.1");
+    let request = if offset > 0 {
+        request.header("Range", format!("bytes={offset}-"))
+    } else {
+        request
+    };
+    let mut response = request.call().context(
+        "Cannot download EmbeddingGemma 2. Check your connection and choose Retry Setup.",
+    )?;
+    if response.status() == 200 {
+        offset = 0;
+    } else if response.status() == 206 {
+        let expected = format!("bytes {offset}-");
+        if !response
+            .headers()
+            .get("Content-Range")
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.starts_with(&expected))
+        {
+            bail!("Model server returned an invalid download range");
+        }
+    } else {
+        bail!("Model server returned {}", response.status());
+    }
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(offset == 0)
+        .append(offset > 0)
+        .mode(0o600)
+        .open(&partial)?;
+    let mut reader = response.body_mut().as_reader();
+    let mut buffer = [0; 65536];
+    loop {
+        progress(offset, bytes)?;
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        offset += n as u64;
+        if offset > bytes {
+            bail!("Model download exceeds its expected size");
+        }
+        output.write_all(&buffer[..n])?;
+    }
+    output.sync_all()?;
+    drop(output);
+    if !verify_download(&partial, bytes, sha256)? {
+        fs::remove_file(partial)?;
+        bail!("Model checksum did not match. Retry Setup to download a verified copy.");
+    }
+    fs::rename(partial, dest)?;
     Ok(())
 }
 
