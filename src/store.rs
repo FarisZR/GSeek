@@ -361,6 +361,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn reconsider_skipped(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET state='pending',error='' WHERE state='skipped' AND folder=0",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn counts(&self) -> Result<Counts> {
         let mut c = Counts::default();
         let mut stmt = self
@@ -739,6 +747,33 @@ mod tests {
         store.checkpoint("pipeline:changed", "pipeline", 0, &chunk)?;
         store.discard_incomplete("pipeline:changed")?;
         assert_eq!(store.content_progress("pipeline:changed")?, 0);
+        Ok(())
+    }
+    #[test]
+    fn changed_content_preferences_requeue_skipped_files_without_repeating_completed_work()
+    -> Result<()> {
+        let (_directory, store, _, file) = fixture()?;
+        store.discover(&file, 1)?;
+        store.complete(&file.uri, "existing")?;
+        let mut skipped = file.clone();
+        skipped.uri.push_str("-skipped");
+        store.discover(&skipped, 1)?;
+        store.mark(&skipped.uri, "skipped", "Image indexing is disabled")?;
+        let mut failed = file.clone();
+        failed.uri.push_str("-failed");
+        store.discover(&failed, 1)?;
+        store.mark(&failed.uri, "failed", "Cannot read file")?;
+        store.reconsider_skipped()?;
+        let counts = store.counts()?;
+        assert_eq!(
+            (
+                counts.indexed,
+                counts.pending,
+                counts.failed,
+                counts.skipped
+            ),
+            (1, 1, 1, 0)
+        );
         Ok(())
     }
     #[test]

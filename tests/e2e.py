@@ -239,6 +239,31 @@ class EndToEnd(unittest.TestCase):
         wait_for(lambda: self.status()["ready"])
         self.assertEqual(self.search("INV-2026-0042")[0]["name"], "Rechnung.txt")
 
+    def test_06b_enabling_images_reconsiders_previously_skipped_files(self):
+        settings = json.loads(self.invoke("Settings")[0])
+        settings["images"] = False
+        self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
+        wait_for(lambda: self.status()["ready"])
+        picture = self.docs / "Blue Square.ppm"
+        picture.write_bytes(b"P6\n128 128\n255\n" + bytes([10, 60, 240]) * 128 * 128)
+        database = ROOT / "data/gseek/index.sqlite3"
+
+        def state():
+            with sqlite3.connect(database) as db:
+                row = db.execute("SELECT state FROM files WHERE uri=?", (picture.as_uri(),)).fetchone()
+                return row[0] if row else None
+
+        try:
+            self.add(picture)
+            wait_for(lambda: state() == "skipped")
+            settings["images"] = True
+            self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
+            wait_for(lambda: state() == "indexed", timeout=300)
+        finally:
+            picture.unlink(missing_ok=True)
+            self.remove(picture)
+            wait_for(lambda: state() is None)
+
     def test_07_install_is_idempotent_and_uninstall_preserves_user_edits(self):
         subprocess.run([BINARY, "integrate"], check=True)
         desktop = ROOT / "data/applications/io.github.FarisZR.GSeek.desktop"
