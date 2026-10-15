@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const READER_VERSION: &str = "readers-1";
+pub const READER_VERSION: &str = "readers-2";
 pub const TEXT_CHARS: usize = 3200;
 pub const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -419,7 +419,7 @@ fn ffmpeg_image(input: &Path, output: &Path, seconds: Option<u64>, temp: &Path) 
             "-frames:v",
             "1",
             "-vf",
-            "scale=672:672:force_original_aspect_ratio=decrease",
+            "scale='min(672,iw)':'min(672,ih)':force_original_aspect_ratio=decrease",
             "-threads",
             "1",
         ])
