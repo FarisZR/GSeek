@@ -112,7 +112,7 @@ and recovery controls; it does not quietly turn into filename-only search.
 ## Current limits
 
 PDF text and visual pages, plain-text formats, DOCX, ODT, images, audio, and video
-are supported. Audio uses 25-second windows every 30 seconds; video frames every
+are supported. Audio uses overlapping 30-second windows every 25 seconds; video frames every
 10 seconds. Limits bound very large inputs; Activity explains skipped files.
 Results retain page or timestamp context but open in the default app, without
 promising page seeking across unrelated viewers.
