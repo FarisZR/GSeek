@@ -87,8 +87,13 @@ impl Runtime {
         }
     }
     pub fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
-        self.embed_inner(input)
-            .map_err(|e| InferenceError(format!("{e:#}")).into())
+        let result = self.embed_inner(input);
+        if result.is_err() {
+            // A closed pipe or timed-out request must not pin a dead worker to
+            // every subsequent query. Drop it; the next request starts afresh.
+            self.worker = None;
+        }
+        result.map_err(|e| InferenceError(format!("{e:#}")).into())
     }
     fn embed_inner(&mut self, input: &Input) -> Result<Vec<f32>> {
         self.last_used = Instant::now();
@@ -447,6 +452,27 @@ fn normalize(vector: &mut [f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Terminates and restarts a real inference helper; needs the pinned model and runtime"]
+    fn worker_restarts_after_process_failure() -> Result<()> {
+        let paths = Paths::from_env();
+        paths.init()?;
+        model::ensure(&paths, |_, _, _| Ok(()))?;
+        let mut runtime = Runtime::new(&paths, &paths.load()?, true);
+        let input = Input::Text {
+            text: "task: search result | query: the clause about pets in the lease".into(),
+        };
+        let expected = runtime.embed(&input)?;
+        let worker = runtime.worker.as_mut().unwrap();
+        worker.child.kill()?;
+        worker.child.wait()?;
+        assert!(runtime.embed(&input).is_err());
+        assert!(runtime.worker.is_none());
+        let actual = runtime.embed(&input)?;
+        validate_vector(&actual)?;
+        assert!(expected.iter().zip(actual).map(|(a, b)| a * b).sum::<f32>() > 0.999);
+        Ok(())
+    }
     #[test]
     fn explicit_device_does_not_silently_select_something_else() {
         assert_eq!(candidates(Backend::Cuda), vec![Backend::Cuda]);
