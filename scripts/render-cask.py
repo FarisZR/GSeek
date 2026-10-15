@@ -37,6 +37,7 @@ def render(version, url, arm_sha, intel_sha):
     File.join(Dir.home, ".cache"),
     *ENV.values_at("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"),
   ].compact.select {{ |path| Pathname.new(path).absolute? }}
+  app_launcher = File.join(Dir.home, ".local/share/gseek-app/bin/gseek")
 
   postflight_steps do
     run "/usr/bin/install",
@@ -44,13 +45,13 @@ def render(version, url, arm_sha, intel_sha):
                "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
         sudo: true
     write_file "~/.local/share/gseek-app/homebrew-prefix", "{{{{HOMEBREW_PREFIX}}}}\\n"
-    run "~/.local/share/gseek-app/bin/gseek",
+    run app_launcher,
         args: ["integrate"],
         writable_paths: user_paths
   end
 
   uninstall_preflight_steps do
-    run "~/.local/share/gseek-app/bin/gseek",
+    run app_launcher,
         args: ["unintegrate"],
         writable_paths: user_paths
   end
