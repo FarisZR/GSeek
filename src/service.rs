@@ -57,10 +57,8 @@ pub fn run(paths: Paths) -> Result<()> {
     paths.init()?;
     let _ = paths.load()?;
     Store::open(&paths.database())?;
-    let app = gio::Application::builder()
-        .application_id(BUS_NAME)
-        .flags(gio::ApplicationFlags::IS_SERVICE)
-        .build();
+    let main_loop = glib::MainLoop::new(None, false);
+    let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
     let shared = Arc::new(Mutex::new(Status {
         state: "starting".into(),
         detail: "Starting GSeek".into(),
@@ -69,32 +67,14 @@ pub fn run(paths: Paths) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let worker_paths = paths.clone();
     let worker_state = shared.clone();
-    std::thread::spawn(move || {
-        // Lower the indexer's scheduling priority without slowing interactive searches.
-        unsafe {
-            libc::setpriority(
-                libc::PRIO_PROCESS,
-                libc::syscall(libc::SYS_gettid) as u32,
-                10,
-            );
-        }
-        if let Err(e) = index_loop(&worker_paths, &worker_state, rx) {
-            status(&worker_state, "error", format!("{e:#}"));
-        }
-    });
     let search = Rc::new(SearchQueue::new(&paths));
     let subscriptions = Rc::new(std::cell::RefCell::new(Vec::new()));
     let live_subscriptions = subscriptions.clone();
     let startup_paths = paths.clone();
     let startup_shared = shared.clone();
     let startup_tx = tx.clone();
-    app.connect_startup(move |app| {
-        // A Gio service needs no display server. Closing GTK windows cannot stop this process.
-        let guard = app.hold();
-        std::mem::forget(guard);
-        let connection = app
-            .dbus_connection()
-            .expect("D-Bus registration must precede startup");
+    {
+        // Export interfaces before owning the name, so the very first activating call is safe.
         let info = gio::DBusNodeInfo::for_xml(SEARCH_XML).unwrap().interfaces()[0].clone();
         let spaths = startup_paths.clone();
         let queue = search.clone();
@@ -215,7 +195,7 @@ pub fn run(paths: Paths) -> Result<()> {
         let paths = startup_paths.clone();
         let state = startup_shared.clone();
         let tx = startup_tx.clone();
-        let app = app.downgrade();
+        let shutdown = main_loop.clone();
         let queue = search.clone();
         connection
             .register_object(CONTROL_PATH, &info)
@@ -272,7 +252,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                         ),
                                     }
                                 });
-                                return Ok(None);
+                                Ok(None)
                             }
                             "Command" => {
                                 let (command, argument) = parameters
@@ -299,9 +279,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                     "enable-search" => integration::enable_search(&paths)?,
                                     "quit" => {
                                         tx.send(Command::Quit)?;
-                                        if let Some(app) = app.upgrade() {
-                                            app.quit();
-                                        }
+                                        shutdown.quit();
                                     }
                                     _ => bail!("Unknown command {command}"),
                                 }
@@ -343,12 +321,38 @@ pub fn run(paths: Paths) -> Result<()> {
                     },
                 ));
         }
-    });
-    let exit = app.run_with_args::<&str>(&[]);
-    let _ = tx.send(Command::Quit);
-    if exit != glib::ExitCode::SUCCESS {
-        bail!("GSeek service exited with {exit:?}");
     }
+    let pending_receiver = std::cell::RefCell::new(Some(rx));
+    let stop = main_loop.clone();
+    let owner = gio::bus_own_name_on_connection(
+        &connection,
+        BUS_NAME,
+        gio::BusNameOwnerFlags::NONE,
+        move |_, _| {
+            let Some(rx) = pending_receiver.borrow_mut().take() else {
+                return;
+            };
+            let worker_paths = worker_paths.clone();
+            let worker_state = worker_state.clone();
+            std::thread::spawn(move || {
+                // Lower the indexer's scheduling priority without slowing interactive searches.
+                unsafe {
+                    libc::setpriority(
+                        libc::PRIO_PROCESS,
+                        libc::syscall(libc::SYS_gettid) as u32,
+                        10,
+                    );
+                }
+                if let Err(e) = index_loop(&worker_paths, &worker_state, rx) {
+                    status(&worker_state, "error", format!("{e:#}"));
+                }
+            });
+        },
+        move |_, _| stop.quit(),
+    );
+    main_loop.run();
+    gio::bus_unown_name(owner);
+    let _ = tx.send(Command::Quit);
     Ok(())
 }
 
@@ -405,7 +409,7 @@ impl SearchQueue {
                     }
                     Store::open(&paths.database())?.search(
                         &job.query,
-                        Some(&vector),
+                        &vector,
                         &runtime.fingerprint(),
                         &settings,
                         job.limit,
@@ -548,57 +552,57 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 last_scan = Instant::now();
             }
             shared.lock().unwrap().counts = store.counts()?;
-            if !settings.paused {
-                if let Some(file) = store.next_pending()? {
-                    shared.lock().unwrap().current = file.path.to_string_lossy().into_owned();
-                    status(shared, "indexing", format!("Reading {}", file.name));
-                    let result = (|| -> Result<()> {
-                        if discovery::record_from_uri(&file.uri, &settings)?.is_none() {
-                            bail!("File moved or is outside the current scope");
-                        }
-                        let hash = extract::content_hash(&file.path)?;
-                        let runtime = runtime.as_mut().unwrap();
-                        let content = format!("{}:{hash}", runtime.fingerprint());
-                        if store.cached(&content, &runtime.fingerprint())? {
-                            store.complete(&file.uri, &content)?;
-                            return Ok(());
-                        }
-                        let mut chunks = vec![];
-                        extract::read(&file, &settings, &paths.cache, |part| {
-                            if shared.lock().unwrap().paused {
-                                bail!("Indexing paused");
-                            }
-                            let vector = runtime.embed(&part.input)?;
-                            chunks.push(StoredChunk {
-                                text: part.text,
-                                vector: Some(vector),
-                                page: part.page,
-                                seconds: part.seconds,
-                            });
-                            Ok(())
-                        })?;
-                        // Do not commit embeddings if the file changed under the reader.
-                        let current = discovery::record_from_uri(&file.uri, &settings)?
-                            .context("File was removed during indexing")?;
-                        if current.stamp != file.stamp {
-                            store.discover(&current, store.start_scan()?)?;
-                            bail!("File changed during indexing; it will be retried");
-                        }
-                        if chunks.is_empty() {
-                            bail!("No searchable content was found");
-                        }
-                        store.save_content(&content, &runtime.fingerprint(), &chunks)?;
-                        store.complete(&file.uri, &content)?;
-                        Ok(())
-                    })();
-                    if let Err(e) = result {
-                        if !shared.lock().unwrap().paused {
-                            store.mark(&file.uri, "failed", &format!("{e:#}"))?;
-                        }
+            if !settings.paused
+                && let Some(file) = store.next_pending()?
+            {
+                shared.lock().unwrap().current = file.path.to_string_lossy().into_owned();
+                status(shared, "indexing", format!("Reading {}", file.name));
+                let result = (|| -> Result<()> {
+                    if discovery::record_from_uri(&file.uri, &settings)?.is_none() {
+                        bail!("File moved or is outside the current scope");
                     }
-                    shared.lock().unwrap().counts = store.counts()?;
-                    continue;
+                    let hash = extract::content_hash(&file.path)?;
+                    let runtime = runtime.as_mut().unwrap();
+                    let content = format!("{}:{hash}", runtime.fingerprint());
+                    if store.cached(&content, &runtime.fingerprint())? {
+                        store.complete(&file.uri, &content)?;
+                        return Ok(());
+                    }
+                    let mut chunks = vec![];
+                    extract::read(&file, &settings, &paths.cache, |part| {
+                        if shared.lock().unwrap().paused {
+                            bail!("Indexing paused");
+                        }
+                        let vector = runtime.embed(&part.input)?;
+                        chunks.push(StoredChunk {
+                            text: part.text,
+                            vector: Some(vector),
+                            page: part.page,
+                            seconds: part.seconds,
+                        });
+                        Ok(())
+                    })?;
+                    // Do not commit embeddings if the file changed under the reader.
+                    let current = discovery::record_from_uri(&file.uri, &settings)?
+                        .context("File was removed during indexing")?;
+                    if current.stamp != file.stamp {
+                        store.discover(&current, store.start_scan()?)?;
+                        bail!("File changed during indexing; it will be retried");
+                    }
+                    if chunks.is_empty() {
+                        bail!("No searchable content was found");
+                    }
+                    store.save_content(&content, &runtime.fingerprint(), &chunks)?;
+                    store.complete(&file.uri, &content)?;
+                    Ok(())
+                })();
+                if let Err(e) = result
+                    && !shared.lock().unwrap().paused
+                {
+                    store.mark(&file.uri, "failed", &format!("{e:#}"))?;
                 }
+                shared.lock().unwrap().counts = store.counts()?;
+                continue;
             }
             if settings.paused {
                 status(

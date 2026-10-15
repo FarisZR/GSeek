@@ -228,12 +228,12 @@ pub fn icon_for(path: &Path, mime: &str) -> gio::Icon {
         gio::FileQueryInfoFlags::NONE,
         gio::Cancellable::NONE,
     ) {
-        if info.boolean("thumbnail::is-valid") {
-            if let Some(thumb) = info.attribute_byte_string("thumbnail::path") {
-                let thumb = Path::new(thumb.as_str());
-                if thumb.is_file() {
-                    return gio::FileIcon::new(&gio::File::for_path(thumb)).upcast();
-                }
+        if info.boolean("thumbnail::is-valid")
+            && let Some(thumb) = info.attribute_byte_string("thumbnail::path")
+        {
+            let thumb = Path::new(thumb.as_str());
+            if thumb.is_file() {
+                return gio::FileIcon::new(&gio::File::for_path(thumb)).upcast();
             }
         }
         if let Some(icon) = info.icon() {
