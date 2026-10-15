@@ -630,6 +630,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
             match command {
                 Command::Quit => return Ok(()),
                 Command::Setup => {
+                    store.reconsider_skipped()?;
                     setup = true;
                     backoff = Instant::now();
                 }
@@ -811,6 +812,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
         match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(Command::Quit) => return Ok(()),
             Ok(Command::Setup) => {
+                store.reconsider_skipped()?;
                 setup = true;
                 backoff = Instant::now();
             }
