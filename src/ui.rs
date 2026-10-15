@@ -144,6 +144,7 @@ impl Window {
 
         let body = vertical(0);
         let banner = adw::Banner::builder()
+            .use_markup(false)
             .title("Setting up semantic search")
             .button_label("View Activity")
             .revealed(false)

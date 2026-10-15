@@ -224,11 +224,15 @@ fn pdf_video_and_document_readers_keep_locations() -> Result<()> {
 }
 
 fn write_pdf(path: &Path) -> Result<()> {
+    let stream = |message: &str| {
+        let body = format!("BT /F1 16 Tf 20 200 Td ({message}) Tj ET\n");
+        format!("<< /Length {} >>\nstream\n{body}endstream", body.len())
+    };
     let objects=["<< /Type /Catalog /Pages 2 0 R >>".to_string(),"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".into(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
-        "<< /Length 56 >>\nstream\nBT /F1 16 Tf 20 200 Td (Pets are welcome.) Tj ET\nendstream".into(),
+        stream("Pets are welcome."),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
-        "<< /Length 57 >>\nstream\nBT /F1 16 Tf 20 200 Td (Payment is monthly.) Tj ET\nendstream".into(),
+        stream("Payment is monthly."),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
     let mut bytes = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0];

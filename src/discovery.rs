@@ -283,13 +283,32 @@ pub fn record_from_uri(uri: &str, settings: &Settings) -> Result<Option<FileReco
     }
     let meta = match fs::symlink_metadata(&path) {
         Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(e) => return Err(e.into()),
     };
     if !(meta.is_file() || meta.is_dir()) || meta.file_type().is_symlink() {
         return Ok(None);
     }
-    if !settings.allows(&fs::canonicalize(&path)?) {
+    let canonical = match fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !settings.allows(&canonical) {
         return Ok(None);
     }
     let (content_type, _) = gio::content_type_guess(Some(&path), None::<&[u8]>);

@@ -170,7 +170,10 @@ impl Store {
     }
 
     pub fn apply_changes(&self, ids: &[i64], records: &[FileRecord]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let seen: std::collections::HashSet<_> = records.iter().map(|f| f.uri.as_str()).collect();
         for id in ids {
             let mut stmt = tx.prepare("SELECT uri FROM files WHERE source_id=?1")?;
@@ -338,26 +341,37 @@ impl Store {
     }
 
     pub fn retry(&self, location: Option<&Path>, failed_only: bool) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let mut stmt = self
             .conn
-            .prepare("SELECT uri,path,state FROM files WHERE folder=0")?;
+            .prepare("SELECT uri,path,state,content FROM files WHERE folder=0")?;
         for row in stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })? {
-            let (uri, path, state) = row?;
+            let (uri, path, state, content) = row?;
             if location.is_none_or(|p| Path::new(&path).starts_with(p))
                 && (!failed_only || state == "failed")
             {
+                if !failed_only && let Some(content) = content {
+                    self.conn
+                        .execute("DELETE FROM contents WHERE id=?1", [content])?;
+                }
                 self.conn.execute(
                     "UPDATE files SET state='pending',error='' WHERE uri=?1",
                     [uri],
                 )?;
             }
         }
+        drop(stmt);
+        tx.commit()?;
         Ok(())
     }
 
@@ -841,6 +855,39 @@ mod tests {
         let c = Connection::open(&path)?;
         c.execute_batch("PRAGMA user_version=99")?;
         assert!(Store::open(&path).is_err());
+        Ok(())
+    }
+    #[test]
+    fn explicit_reindex_discards_completed_vectors_but_keeps_file_metadata() -> Result<()> {
+        let (_dir, mut store, settings, file) = fixture()?;
+        store.discover(&file, 1)?;
+        store.save_content("hash", "pipeline", &[])?;
+        store.complete(&file.uri, "hash")?;
+        store.retry(Some(&settings.folders[0]), false)?;
+        assert!(!store.cached("hash", "pipeline")?);
+        assert!(store.file(&file.uri)?.is_some());
+        assert_eq!(store.counts()?.pending, 1);
+        Ok(())
+    }
+    #[test]
+    fn delta_updates_wait_for_an_active_index_writer() -> Result<()> {
+        let (dir, _, _, file) = fixture()?;
+        let path = dir.path().join("concurrent.sqlite");
+        let writer = Store::open(&path)?;
+        writer.discover(&file, 1)?;
+        let updater = Store::open(&path)?;
+        writer.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let ready = barrier.clone();
+        let thread = std::thread::spawn(move || {
+            ready.wait();
+            updater.apply_changes(&[file.source_id], &[])
+        });
+        barrier.wait();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        writer.conn.execute_batch("COMMIT")?;
+        thread.join().unwrap()?;
+        assert_eq!(writer.counts()?.files, 0);
         Ok(())
     }
 }
