@@ -336,6 +336,7 @@ impl Worker {
         }
         if backend == Backend::Rocm {
             cmd.env("ROCBLAS_TENSILE_LIBPATH", dir.join("rocblas/library"));
+            cmd.env("HIPBLASLT_TENSILE_LIBPATH", dir.join("hipblaslt/library"));
         }
         if backend == Backend::Vulkan
             && !std::path::Path::new("/dev/dri").exists()
