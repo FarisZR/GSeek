@@ -68,9 +68,14 @@ pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
         app.activate();
         let args = command.arguments();
         if let Some(ui) = state.borrow().as_ref()
-            && let Some(query) = args.get(1).and_then(|s| s.to_str())
+            && let Some(query) = args
+                .get(1)
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
         {
+            ui.view_stack.set_visible_child_name("search");
             ui.entry.set_text(query);
+            ui.entry.grab_focus();
         }
         glib::ExitCode::SUCCESS
     });
