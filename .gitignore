@@ -1,0 +1,6 @@
+/target/
+/build/
+/dist/
+/work/
+*.AppImage
+__pycache__/
