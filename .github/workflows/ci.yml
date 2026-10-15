@@ -57,9 +57,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            build
-            .ci-data/gseek/models
-          key: native-${{ matrix.distro }}-${{ matrix.backend }}-${{ hashFiles('Cargo.lock', 'inference/**', 'scripts/build-inference.sh') }}
+            .ci-data/gseek
+          key: native-${{ matrix.distro }}-${{ matrix.backend }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
           restore-keys: native-${{ matrix.distro }}-${{ matrix.backend }}-
       - name: Check formatting and lint
         run: |
@@ -70,8 +69,6 @@ jobs:
           cargo test --locked --all-targets
           cargo test --locked --no-default-features --lib
           cargo build --locked
-      - name: Build pinned inference backend
-        run: bash scripts/build-inference.sh '${{ matrix.backend }}'
       - name: Test real embeddings, readers, D-Bus, and GTK
         shell: bash
         env:
@@ -85,7 +82,7 @@ jobs:
           XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
           XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
           XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
-          GSEEK_RUNTIME_DIR: ${{ github.workspace }}/dist/runtime
+          GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
           GSEEK_INFERENCE_TIMEOUT: '300'
         run: |
           set -euo pipefail
@@ -142,9 +139,5 @@ jobs:
         run: |
           rustup toolchain install 1.99.0 --profile minimal
           cargo build --locked --release
-          mkdir -p dist/runtime/{cpu,vulkan}
-          # The lifecycle test checks registration and launch, independently of inference build jobs.
-          printf '#!/bin/sh\nexit 1\n' > dist/runtime/cpu/gseek-inference
-          cp dist/runtime/cpu/gseek-inference dist/runtime/vulkan/
           bash scripts/package.sh
           python3 scripts/test-homebrew.py

@@ -7,6 +7,4 @@ if [[ -f "$bundle/homebrew-prefix" ]]; then
   export PATH="$brew_prefix/bin:$PATH"
 fi
 export GSEEK_LAUNCHER="$self"
-export GSEEK_RUNTIME_DIR="$bundle/runtime"
-export GSEEK_RUNTIME_MANIFEST="$bundle/runtime-manifest.json"
 exec "$bundle/bin/gseek-native" "$@"

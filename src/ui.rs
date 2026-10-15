@@ -611,7 +611,6 @@ impl Window {
             "CPU",
             "Vulkan (AMD / Intel)",
             "NVIDIA CUDA",
-            "AMD ROCm (advanced)",
         ]);
         let backend = adw::ComboRow::builder()
             .title("Compute Backend")
@@ -621,30 +620,9 @@ impl Window {
                 Backend::Cpu => 1,
                 Backend::Vulkan => 2,
                 Backend::Cuda => 3,
-                Backend::Rocm => 4,
             })
             .build();
         local.add(&backend);
-        let overrides = gtk::StringList::new(&[
-            "None",
-            "10.3.0 (RX 6700 XT / gfx1031)",
-            "11.0.0",
-            "11.0.1",
-            "12.0.0",
-        ]);
-        let rocm = adw::ComboRow::builder()
-            .title("ROCm Compatibility Override")
-            .subtitle("Used only for ROCm; Vulkan does not need this override")
-            .model(&overrides)
-            .selected(match draft.borrow().rocm_override.as_deref() {
-                Some("10.3.0") => 1,
-                Some("11.0.0") => 2,
-                Some("11.0.1") => 3,
-                Some("12.0.0") => 4,
-                _ => 0,
-            })
-            .build();
-        local.add(&rocm);
         inference.add(&local);
         let external=adw::PreferencesGroup::builder().title("Existing Inference Endpoint").description("Advanced: OpenAI-compatible text embeddings only. Images, scanned PDFs, audio, and video require managed inference. The endpoint must identify an EmbeddingGemma 2 model and return 768 dimensions.").build();
         let use_external = adw::SwitchRow::builder()
@@ -734,17 +712,9 @@ impl Window {
                 1 => Backend::Cpu,
                 2 => Backend::Vulkan,
                 3 => Backend::Cuda,
-                4 => Backend::Rocm,
                 _ => Backend::Auto,
             };
-            settings.rocm_override = match rocm.selected() {
-                1 => Some("10.3.0"),
-                2 => Some("11.0.0"),
-                3 => Some("11.0.1"),
-                4 => Some("12.0.0"),
-                _ => None,
-            }
-            .map(str::to_owned);
+
             settings.external = if use_external.is_active() {
                 Some(External {
                     url: address.text().to_string(),

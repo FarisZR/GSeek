@@ -4,7 +4,7 @@ GSeek has three small process boundaries:
 
 1. **GTK4/libadwaita app:** a normal single-instance GNOME application. It calls the background service over the session bus. GTK objects stay on the main thread; network and database work stay off it.
 2. **Background service:** owns `io.github.FarisZR.GSeek.Service`, exports GNOME’s `SearchProvider2` plus a private JSON control interface, and survives the window closing. D-Bus activation and XDG autostart handle its lifecycle without user systemd configuration.
-3. **Inference helper:** an isolated embedding-only llama.cpp process with a bounded JSON-lines protocol. It has no listening socket. Separate query and indexing helpers prevent a long media job from blocking queries. Workers exit with their parent, have startup/request deadlines, and release models when idle.
+3. **Upstream inference runtime:** an unmodified, version-pinned `llama-server` process with its native multimodal embedding API over an owner-only Unix socket. No TCP listener is opened. Separate query and indexing processes prevent a long media job from blocking queries. Workers exit with their parent, have startup/request deadlines, and release models when idle.
 
 ## Discovery and indexing
 
@@ -44,13 +44,14 @@ if measured library sizes require it.
 
 ## Inference contracts
 
-The model revision, GGUF sizes and SHA-256 values, llama.cpp source revision, and
+The model revision, GGUF sizes and SHA-256 values, upstream llama.cpp release, and
 embedding reference vector are pinned together. Managed text, image, and audio
 inputs share one embedding space; video and PDFs emit bounded frame/page parts.
 A reference canary validates query framing and pooling at setup. There is no
-keyword-only mode when inference is unavailable. The helper allocates its encoder
-context from the actual input token count and grows it only when needed, keeping
-short-query and software-Vulkan memory use bounded by the request. Auto hardware
+keyword-only mode when inference is unavailable. The upstream server owns model loading,
+encoding, and GPU execution. GSeek uses a small query context and a larger media
+context, requests mean pooling and L2 normalization, and validates every vector.
+Auto hardware
 selection retries with another backend if initialization or inference fails; an
 explicit backend reports its failure.
 
@@ -72,6 +73,10 @@ Integration tracks checksums and the previous Files/GSeek provider settings.
 Uninstallation removes only unchanged owned files and restores only those settings
 it changed. Index data survives. The launcher uses host GTK/GLib/LocalSearch; it
 does not override those libraries with Homebrew copies. Homebrew provides media
-readers. CPU and Vulkan helpers are included; checksummed CUDA/ROCm redistributables
-are downloaded only when selected. The release manifest embedded in each core
-package binds the app version to its exact GPU assets.
+readers. All inference backends are downloaded directly from official llama.cpp
+release assets. The embedded `data/runtimes.json` pins release URLs, exact sizes,
+and checksums for CPU, Vulkan, and CUDA on both architectures. CUDA includes its
+upstream redistributable libraries. GSeek verifies downloads, serializes installation,
+and atomically installs each backend. The app does not compile, patch, or rehost
+inference engines. Private sockets and child-only library paths isolate the
+runtime from the native GNOME process.

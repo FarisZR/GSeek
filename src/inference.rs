@@ -9,11 +9,9 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     fs,
-    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc,
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -134,8 +132,7 @@ impl Runtime {
             let mut failures = vec![];
             for backend in candidates(self.settings.backend) {
                 let attempt: Result<_> = (|| {
-                    let mut worker =
-                        Worker::start(&self.paths, &self.settings, self.query_only, backend)?;
+                    let mut worker = Worker::start(&self.paths, self.query_only, backend)?;
                     let vector = worker.embed(input)?;
                     Ok((worker, vector))
                 })();
@@ -179,112 +176,16 @@ pub fn candidates(selected: Backend) -> Vec<Backend> {
     result
 }
 
-pub fn runtime_directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
-    let name = format!("{backend:?}").to_lowercase();
-    if let Some(dir) = std::env::var_os("GSEEK_RUNTIME_DIR") {
-        let dir = PathBuf::from(dir);
-        if dir.join(&name).is_dir() {
-            return Ok(dir.join(name));
-        }
-        if dir.join("gseek-inference").is_file() {
-            return Ok(dir);
-        }
-    }
-    let exe = std::env::current_exe()?;
-    let prefix = exe.parent().context("Missing executable directory")?;
-    for dir in [
-        prefix.join("runtime").join(&name),
-        prefix.join("../libexec/gseek/runtime").join(&name),
-        prefix.join("../../dist/runtime").join(&name),
-    ] {
-        if dir.join("gseek-inference").is_file() {
-            return Ok(dir);
-        }
-    }
-    install_runtime(paths, &name)
-}
-
-#[derive(serde::Deserialize)]
-struct RuntimeManifest {
-    version: u32,
-    assets: std::collections::BTreeMap<String, std::collections::BTreeMap<String, RuntimeAsset>>,
-}
-#[derive(serde::Deserialize)]
-struct RuntimeAsset {
-    url: String,
-    sha256: String,
-    bytes: u64,
-}
-
-fn install_runtime(paths: &Paths, backend: &str) -> Result<PathBuf> {
-    let manifest = std::env::var_os("GSEEK_RUNTIME_MANIFEST").context(
-        "This development build has no managed runtime manifest; use scripts/build-inference.sh",
-    )?;
-    let manifest: RuntimeManifest = serde_json::from_slice(&fs::read(manifest)?)?;
-    if manifest.version != 1 {
-        bail!("Unsupported runtime manifest; reinstall GSeek");
-    }
-    let asset=manifest.assets.get(backend).and_then(|a|a.get(std::env::consts::ARCH))
-        .with_context(||format!("The {backend} backend is not distributed for this architecture; choose Automatic or Vulkan"))?;
-    let prefix = format!(
-        "https://github.com/FarisZR/GSeek/releases/download/v{}/",
-        env!("CARGO_PKG_VERSION")
-    );
-    if !asset.url.starts_with(&prefix)
-        || asset.sha256.len() != 64
-        || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        bail!("Invalid managed runtime metadata");
-    }
-    let root = paths.data.join("runtimes");
-    fs::create_dir_all(&root)?;
-    let install_lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(root.join(format!("{backend}.lock")))?;
-    install_lock.lock()?;
-    let dest = root.join(format!("{backend}-{}", &asset.sha256[..16]));
-    if dest.join("gseek-inference").is_file() {
-        return Ok(dest);
-    }
-    let archive = root.join(format!("{backend}-{}.tar.gz", &asset.sha256[..16]));
-    model::download_verified(&asset.url, &archive, asset.bytes, &asset.sha256, |_, _| {
-        Ok(())
-    })?;
-    let temp = tempfile::tempdir_in(&root)?;
-    let status = Command::new(crate::extract::tool("bsdtar"))
-        .arg("-xf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(temp.path())
-        .args(["--no-same-owner", "--no-same-permissions"])
-        .stdin(Stdio::null())
-        .status()?;
-    if !status.success() || !temp.path().join(backend).join("gseek-inference").is_file() {
-        bail!("Cannot unpack the verified {backend} runtime");
-    }
-    fs::rename(temp.path().join(backend), &dest)?;
-    fs::remove_file(archive)?;
-    Ok(dest)
-}
-
+// The worker is an unmodified upstream server, reached only through a private socket.
 struct Worker {
     child: Child,
-    input: ChildStdin,
-    output: mpsc::Receiver<Result<Value, String>>,
-    next_id: u64,
+    client: ureq::Agent,
+    media_marker: String,
+    _socket_dir: tempfile::TempDir,
 }
 impl Worker {
-    fn start(
-        paths: &Paths,
-        settings: &Settings,
-        query_only: bool,
-        backend: Backend,
-    ) -> Result<Self> {
-        let dir = runtime_directory(paths, backend)?;
+    fn start(paths: &Paths, query_only: bool, backend: Backend) -> Result<Self> {
+        let dir = crate::managed_runtime::directory(paths, backend)?;
         let models = paths.data.join("models");
         for file in if query_only {
             &model::FILES[..1]
@@ -299,10 +200,62 @@ impl Worker {
                 bail!("The model download is incomplete. Open GSeek and choose Retry Setup.");
             }
         }
-        let mut cmd = Command::new(dir.join("gseek-inference"));
+        // This short owner-only path fits Linux's Unix socket path limit even
+        // when the user's XDG directory is deeply nested. No TCP port is opened.
+        let socket_dir = tempfile::Builder::new()
+            .prefix("gseek-")
+            .tempdir_in("/tmp")?;
+        let socket = socket_dir.path().join("inference.sock");
+        let context = if query_only { "512" } else { "2048" };
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(2)
+            .to_string();
+        let mut cmd = Command::new(dir.join("llama-server"));
+        cmd.arg("--model")
+            .arg(models.join(model::FILES[0].name))
+            .args([
+                "--embedding",
+                "--pooling",
+                "mean",
+                "--ctx-size",
+                context,
+                "--batch-size",
+                context,
+                "--ubatch-size",
+                context,
+                "--parallel",
+                "1",
+                "--threads",
+                &threads,
+                "--threads-batch",
+                &threads,
+                "--gpu-layers",
+                if backend == Backend::Cpu { "0" } else { "99" },
+                "--device",
+                match backend {
+                    Backend::Cpu => "none",
+                    Backend::Vulkan => "Vulkan0",
+                    Backend::Cuda => "CUDA0",
+                    Backend::Auto => unreachable!(),
+                },
+                "--flash-attn",
+                "off",
+                "--no-warmup",
+                "--image-min-tokens",
+                "1",
+                "--image-max-tokens",
+                "1120",
+                "--no-ui",
+                "--host",
+            ])
+            .arg(&socket);
+        if !query_only {
+            cmd.arg("--mmproj").arg(models.join(model::FILES[1].name));
+        }
         use std::os::unix::process::CommandExt;
-        // SAFETY: prctl/getppid are async-signal-safe on Linux. A crashed or stopped service
-        // must not leave a model process holding GPU memory after its parent disappears.
+        // SAFETY: these Linux calls are async-signal-safe. A service crash must
+        // not leave a model process holding GPU memory after its parent exits.
         unsafe {
             cmd.pre_exec(|| {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
@@ -321,124 +274,95 @@ impl Worker {
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log_path)?;
-        cmd.arg(models.join(model::FILES[0].name))
-            .arg(if query_only {
-                PathBuf::from("-")
-            } else {
-                models.join(model::FILES[1].name)
-            })
-            .arg(&dir)
-            .arg(if backend == Backend::Cpu {
-                "cpu"
-            } else {
-                "gpu"
-            })
-            .arg(
-                std::thread::available_parallelism()
-                    .map(|n| n.get().min(4))
-                    .unwrap_or(2)
-                    .to_string(),
-            )
-            .env(
-                "LD_LIBRARY_PATH",
-                std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
-                    &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
-                )))?,
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(log);
-        if backend == Backend::Rocm
-            && let Some(v) = &settings.rocm_override
-        {
-            cmd.env("HSA_OVERRIDE_GFX_VERSION", v);
-        }
-        if backend == Backend::Rocm {
-            cmd.env("ROCBLAS_TENSILE_LIBPATH", dir.join("rocblas/library"));
-            cmd.env("HIPBLASLT_TENSILE_LIBPATH", dir.join("hipblaslt/library"));
-        }
+            .mode(0o600)
+            .open(&log_path)?;
+        cmd.env(
+            "LD_LIBRARY_PATH",
+            std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
+                &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+            )))?,
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
         if backend == Backend::Vulkan
             && !std::path::Path::new("/dev/dri").exists()
             && std::env::var_os("GGML_VK_VISIBLE_DEVICES").is_none()
         {
             cmd.env("GGML_VK_VISIBLE_DEVICES", "0");
         }
-        let mut child = cmd
-            .spawn()
-            .context("Cannot launch the managed embedding worker")?;
-        let input = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (tx, output) = mpsc::sync_channel(2);
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut line = String::new();
-                let result = reader.by_ref().take(256 * 1024).read_line(&mut line);
-                let value = match result {
-                    Ok(0) => break,
-                    Ok(_) => serde_json::from_str(&line).map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                };
-                if tx.send(value).is_err() {
-                    break;
-                }
-            }
-        });
-        let worker = Self {
-            child,
-            input,
-            output,
-            next_id: 0,
-        };
-        let hello = worker.receive(Duration::from_secs(90)).with_context(|| {
-            let log = fs::read_to_string(paths.data.join("inference.log")).unwrap_or_default();
-            let tail = log
-                .lines()
-                .rev()
-                .take(8)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("Managed runtime did not become ready. {tail}")
-        })?;
-        if hello["ready"] != true
-            || hello["model"] != "google/embeddinggemma-2"
-            || hello["dimensions"] != DIMENSIONS
-            || hello["protocol"] != 1
-        {
-            bail!("Managed runtime has an incompatible model or protocol");
-        }
-        Ok(worker)
-    }
-    fn receive(&self, timeout: Duration) -> Result<Value> {
-        self.output
-            .recv_timeout(timeout)
-            .context(
-                "Embedding worker stopped or timed out; see Indexing & Activity for diagnostics",
-            )?
-            .map_err(anyhow::Error::msg)
-    }
-    fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
-        self.next_id += 1;
-        serde_json::to_writer(&mut self.input, &json!({"id":self.next_id,"input":input}))?;
-        self.input.write_all(b"\n")?;
-        self.input.flush()?;
         let timeout = std::env::var("GSEEK_INFERENCE_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60)
             .clamp(1, 600);
-        let response = self.receive(Duration::from_secs(timeout))?;
-        if let Some(error) = response["error"].as_str() {
-            bail!("Embedding failed: {error}");
+        let mut worker = Self {
+            child: cmd
+                .spawn()
+                .context("Cannot launch the upstream embedding runtime")?,
+            client: crate::local_http::agent(socket.clone(), Duration::from_secs(timeout)),
+            media_marker: String::new(),
+            _socket_dir: socket_dir,
+        };
+        let readiness = crate::local_http::agent(socket, Duration::from_secs(1));
+        let started = Instant::now();
+        loop {
+            if worker.child.try_wait()?.is_some() || started.elapsed() > Duration::from_secs(90) {
+                let log = fs::read_to_string(log_path).unwrap_or_default();
+                let tail = log
+                    .lines()
+                    .rev()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!("Embedding runtime did not become ready. {tail}");
+            }
+            if readiness.get("http://127.0.0.1/health").call().is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        if response["id"] != self.next_id {
-            bail!("Embedding response does not match the pending request");
-        }
-        let vector: Vec<f32> = serde_json::from_value(response["vector"].clone())?;
+        let props: Value = worker
+            .client
+            .get("http://127.0.0.1/props")
+            .call()?
+            .body_mut()
+            .read_json()?;
+        worker.media_marker = props["media_marker"]
+            .as_str()
+            .context("Upstream runtime has no multimodal API")?
+            .to_owned();
+        Ok(worker)
+    }
+    fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
+        use base64::Engine;
+        let content = match input {
+            Input::Text { text } => json!(text),
+            Input::Image { path } | Input::Audio { path } => {
+                let data = fs::read(path)?;
+                if data.len() > 32 * 1024 * 1024 {
+                    bail!("Prepared media exceeds the embedding input limit");
+                }
+                json!({"prompt_string":self.media_marker,"multimodal_data":[base64::engine::general_purpose::STANDARD.encode(data)]})
+            }
+        };
+        let response: Value = self
+            .client
+            .post("http://127.0.0.1/embedding")
+            .send_json(json!({"content":content,"embd_normalize":2}))
+            .context("Embedding failed; see Indexing & Activity for diagnostics")?
+            .body_mut()
+            .read_json()?;
+        let embedding = &response[0]["embedding"];
+        let embedding = if embedding[0].is_array() {
+            &embedding[0]
+        } else {
+            embedding
+        };
+        let vector: Vec<f32> = serde_json::from_value(embedding.clone())?;
         validate_vector(&vector)?;
         Ok(vector)
     }
@@ -514,7 +438,6 @@ mod tests {
     #[test]
     fn explicit_device_does_not_silently_select_something_else() {
         assert_eq!(candidates(Backend::Cuda), vec![Backend::Cuda]);
-        assert_eq!(candidates(Backend::Rocm), vec![Backend::Rocm]);
     }
     #[test]
     fn external_vectors_must_have_the_right_contract() {

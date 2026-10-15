@@ -3,6 +3,8 @@ pub mod discovery;
 pub mod extract;
 pub mod inference;
 pub mod integration;
+mod local_http;
+mod managed_runtime;
 pub mod model;
 pub mod service;
 pub mod store;

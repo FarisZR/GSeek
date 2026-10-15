@@ -26,22 +26,19 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config cmake ninja-build libvulkan-dev glslc spirv-headers clang
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config libarchive-tools
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            build
-            .release-data/gseek/models
-          key: release-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'inference/**', 'scripts/build-inference.sh') }}
+            .release-data/gseek
+          key: release-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
           restore-keys: release-${{ matrix.arch }}-
-      - name: Build native app and bundled CPU and Vulkan helpers
+      - name: Build native app
         run: |
           cargo build --release --locked
-          bash scripts/build-inference.sh cpu
-          bash scripts/build-inference.sh vulkan
           bash scripts/package.sh '${{ matrix.arch }}'
       - name: Validate packaged CPU inference on this architecture
         env:
@@ -68,11 +65,9 @@ jobs:
           path: dist/gseek-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           compression-level: 0
-  gpu:
-    uses: ./.github/workflows/gpu.yml
   assemble:
     name: Assemble and stage release
-    needs: [core, gpu]
+    needs: [core]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

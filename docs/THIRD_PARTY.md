@@ -1,16 +1,15 @@
 # Third-party components
 
-The Rust application is GPL-3.0-or-later. The separate inference helper is MIT
-(see inference/LICENSE). GSeek uses the host GNOME GTK, libadwaita, GLib and
-TinySPARQL libraries. Media readers are Homebrew dependencies, with their own
-licenses and notices.
+The Rust application is GPL-3.0-or-later. GSeek uses the host GNOME GTK,
+libadwaita, GLib, and TinySPARQL libraries. Media readers are Homebrew dependencies,
+with their own licenses and notices.
 
-The managed inference bundle contains llama.cpp and ggml (MIT), including their
-vendored components. The bundle includes llama.cpp's LICENSE; its source at
-commit `4d756bc72bf00a4aacf410ae15a2d315f3db400d` is available at
-https://github.com/ggml-org/llama.cpp/tree/4d756bc72bf00a4aacf410ae15a2d315f3db400d.
-That source contains the notices for its vendored nlohmann/json, stb, miniaudio,
-and other components. Release packaging preserves these notices.
+GSeek downloads unmodified official llama.cpp distributions (MIT), including
+upstream's license, tools, libraries, and notices. It does not build or modify
+llama.cpp. The pinned runtime release is [b11669](https://github.com/ggml-org/llama.cpp/releases/tag/b11669);
+`data/runtimes.json` records the exact assets and checksums. CUDA installations
+also download the corresponding official CUDA redistributable archive; NVIDIA's
+redistribution terms apply to those upstream libraries.
 
 EmbeddingGemma 2 weights are downloaded separately from ggml-org's conversion at
 revision `bfcd298762cc34d0357ece5ebdd31791a3a374d8` (Apache-2.0); they are not part
@@ -18,9 +17,9 @@ of the application download. Model: https://huggingface.co/google/embeddinggemma
 Conversion: https://huggingface.co/ggml-org/embeddinggemma-2-GGUF.
 
 DigUp (MIT), by Abdur Rahim, informed GSeek's model selection, pinned model file
-metadata, inference framing, and the small embedding-only allocation patch.
-Its source and license: https://github.com/ARahim3/DigUp. GSeek has its own Rust
-application, index, GNOME integration, and C++ worker implementation.
+metadata, and inference framing. Its source and license:
+https://github.com/ARahim3/DigUp. GSeek has its own Rust application, index, and
+GNOME integration.
 
 Rust dependency licenses and versions are recorded in Cargo.lock and their
 published crates. Release CI produces a dependency license inventory.

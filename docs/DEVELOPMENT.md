@@ -1,7 +1,7 @@
 # Development
 
 Use a recent Linux GNOME desktop, Rust 1.99.0 (pinned in `rust-toolchain.toml`),
-GTK4/libadwaita development headers, TinySPARQL, CMake, Ninja, and a C++17 compiler.
+GTK4/libadwaita development headers, TinySPARQL, and the native media readers.
 On Fedora 45 or Ubuntu 26.10, `scripts/ci-deps.sh` records the distribution packages
 used by CI; run it only in a disposable development machine/container or install
 the listed packages through your package manager.
@@ -10,26 +10,24 @@ the listed packages through your package manager.
 
 ```sh
 cargo build --locked
-bash scripts/build-inference.sh cpu
-bash scripts/build-inference.sh vulkan  # Vulkan SDK headers, glslc, SPIR-V headers
 cargo run -- prepare-model
 ```
 
-`prepare-model` downloads and verifies the real 865 MB model. The helper builder
-fetches an immutable llama.cpp revision and applies the small embedding allocation
-patch. CPU builds use runtime-selected ISA variants, not the build machine’s ISA.
-On ARM64 a compiler supporting ARMv9.2/SME is needed for those variants; the script
-selects GCC 14 or a suitable Clang when available. Actual runtime instructions
-still match the user’s CPU.
+`prepare-model` downloads and verifies the real 865 MB model. First inference
+automatically installs the selected official prebuilt llama.cpp runtime. No
+inference compilation, GPU SDK, or manually configured server is needed.
+
+The embedded `data/runtimes.json` pins official release URLs, byte sizes, and
+SHA-256 digests for CPU, Vulkan, and CUDA on both architectures. To update the
+runtime, use GitHub's release asset digests, update the pipeline fingerprint in
+`src/model.rs`, and run the reference and multimodal tests before merging.
+For offline development, `GSEEK_RUNTIME_DIR` can point to a directory containing
+unmodified upstream distributions in `cpu/`, `vulkan/`, and/or `cuda/`.
 
 For a development desktop install, place `data/io.github.FarisZR.GSeek.ini` in a
 system `gnome-shell/search-providers` directory, then run `cargo run -- integrate`
 and open `cargo run`. The system file requires administrator permission. The
 isolated tests below create a private system data directory and need no root.
-
-Advanced build commands are `scripts/build-inference.sh cuda` and
-`scripts/build-inference.sh rocm`, with the matching SDK. End users do not need
-these SDKs. The GPU workflow pins the exact official SDK container images.
 
 ## Tests
 
@@ -76,22 +74,21 @@ from the real model, then captures `overview.png`.
 
 CI executes these checks on GNOME 51 / Fedora 45 and Ubuntu 26.10, for CPU and
 Vulkan. Software Vulkan is slower; CI permits a 300-second inference timeout.
-CUDA/ROCm are compiled against pinned SDKs on every relevant PR. Physical GPU
-validation remains a separate hardware task; green CI does not establish GPU
-performance or support for every driver.
+Physical CUDA/AMD GPU validation remains a hardware task; green CI does not
+establish GPU performance or support for every driver. No CI job builds an
+inference engine or GPU SDK.
 
 ## Releases
 
-A `vX.Y.Z` tag or a manual Release workflow builds both native architectures,
-CPU/Vulkan helpers, and CUDA/ROCm redistributable bundles. Each architecture runs
-the packaged CPU encoder against the reference vector before upload. It combines checksums
-into a runtime manifest embedded in both core packages, generates the Homebrew
-cask and `SHA256SUMS`, and stages a **draft** GitHub release. Rust license inventory,
-helper source revision, and third-party notices travel with the package.
+A `vX.Y.Z` tag or a manual Release workflow builds the Rust application for
+x86-64 and ARM64. Each architecture installs the pinned upstream CPU runtime and
+runs the packaged encoder against the reference vector before upload. Assembly
+preserves the exact tested packages, generates the Homebrew cask and `SHA256SUMS`,
+and stages a **draft** GitHub release. Rust license inventory and third-party
+notices travel with the package. Runtime downloads come directly from upstream.
 
-Review and verify the staged assets, publish the release, then synchronize the
-existing `FarisZR/homebrew-tap` cask. No custom Flatpak repository is created.
+Verify the staged assets, publish the release, then synchronize the existing
+`FarisZR/homebrew-tap` cask. No custom Flatpak repository is created.
 `python3 scripts/test-homebrew.py` exercises an exact local release package through
 Homebrew install/reinstall/uninstall, checks native GUI startup and desktop
-registrations, and asserts indexed data survives. Its lifecycle-only fixture may
-use dummy inference helpers; real inference has its own independent CI jobs.
+registrations, and asserts indexed data survives.
