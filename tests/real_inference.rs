@@ -25,7 +25,9 @@ fn media_readers_do_not_follow_network_playlists() -> Result<()> {
     let directory = tempfile::Builder::new()
         .prefix("gseek-playlist-")
         .tempdir()?;
-    let playlist = directory.path().join("recording.m3u8");
+    // A playlist disguised as a video must reach probing, rather than being
+    // rejected only because its filename has an unsupported playlist extension.
+    let playlist = directory.path().join("recording.mp4");
     fs::write(
         &playlist,
         format!(
@@ -43,6 +45,7 @@ fn media_readers_do_not_follow_network_playlists() -> Result<()> {
         &settings,
     )?
     .unwrap();
+    assert!(file.mime.starts_with("video/"));
     let result = gseek::extract::read(&file, &settings, directory.path(), |_| Ok(()));
     assert!(result.is_err(), "A remote playlist must be rejected");
     assert!(
