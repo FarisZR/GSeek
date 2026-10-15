@@ -28,17 +28,19 @@ pub const FILES: [ModelFile; 2] = [
     },
 ];
 
-pub fn agent(timeout: Duration, redirects: u32) -> ureq::Agent {
-    ureq::Agent::config_builder()
+pub fn agent(timeout: Duration, redirects: u32, direct: bool) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
                 .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
         .timeout_global(Some(timeout))
-        .max_redirects(redirects)
-        .build()
-        .into()
+        .max_redirects(redirects);
+    // A local inference endpoint must remain local even when the desktop has
+    // an HTTP proxy configured. Downloads and explicitly remote endpoints use it.
+    let config = if direct { config.proxy(None) } else { config };
+    config.build().into()
 }
 
 pub fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
@@ -110,7 +112,7 @@ pub fn download_verified(
         fs::remove_file(&partial)?;
         offset = 0;
     }
-    let client = agent(Duration::from_secs(3600), 8);
+    let client = agent(Duration::from_secs(3600), 8, false);
     let request = client.get(url).header("User-Agent", "GSeek/0.1");
     let request = if offset > 0 {
         request.header("Range", format!("bytes={offset}-"))

@@ -22,6 +22,8 @@ pub fn now() -> i64 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileRecord {
+    #[serde(default)]
+    pub source_id: i64,
     pub uri: String,
     pub path: PathBuf,
     pub name: String,
@@ -76,25 +78,40 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-8192; PRAGMA synchronous=NORMAL;")?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
+        if version > 3 {
             bail!("This index was created by a newer GSeek; please upgrade the application");
         }
         if version == 0 {
             conn.execute_batch("BEGIN IMMEDIATE;
             CREATE TABLE files(uri TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
                 folded TEXT NOT NULL, stamp TEXT NOT NULL, size INTEGER NOT NULL, folder INTEGER NOT NULL,
-                seen INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', content TEXT, error TEXT NOT NULL DEFAULT '');
+                seen INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', content TEXT, error TEXT NOT NULL DEFAULT '',source_id INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX file_queue ON files(state, size);
-            CREATE TABLE contents(id TEXT PRIMARY KEY, pipeline TEXT NOT NULL, created INTEGER NOT NULL);
+            CREATE INDEX file_source ON files(source_id);
+            CREATE TABLE contents(id TEXT PRIMARY KEY, pipeline TEXT NOT NULL, created INTEGER NOT NULL, complete INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE chunks(id INTEGER PRIMARY KEY, content TEXT NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
-                text TEXT NOT NULL, vector BLOB, page INTEGER, seconds REAL);
+                text TEXT NOT NULL, vector BLOB, page INTEGER, seconds REAL, part INTEGER NOT NULL);
             CREATE INDEX content_chunks ON chunks(content);
+            CREATE UNIQUE INDEX chunk_part ON chunks(content,part);
             CREATE VIRTUAL TABLE words USING fts5(text, content='chunks', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
             CREATE TRIGGER chunks_insert AFTER INSERT ON chunks BEGIN INSERT INTO words(rowid,text) VALUES(new.id,new.text); END;
             CREATE TRIGGER chunks_delete AFTER DELETE ON chunks BEGIN INSERT INTO words(words,rowid,text) VALUES('delete',old.id,old.text); END;
             CREATE TABLE activity(time INTEGER NOT NULL, path TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL);
             CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            PRAGMA user_version=1; COMMIT;")?;
+            PRAGMA user_version=3; COMMIT;")?;
+        } else if version == 1 {
+            conn.execute_batch("BEGIN IMMEDIATE;
+                ALTER TABLE contents ADD COLUMN complete INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE chunks ADD COLUMN part INTEGER;
+                WITH ranks AS (SELECT id, row_number() OVER (PARTITION BY content ORDER BY id)-1 AS n FROM chunks)
+                UPDATE chunks SET part=(SELECT n FROM ranks WHERE ranks.id=chunks.id);
+                CREATE UNIQUE INDEX chunk_part ON chunks(content,part);
+                ALTER TABLE files ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX file_source ON files(source_id);
+                PRAGMA user_version=3; COMMIT;")?;
+        }
+        if version == 2 {
+            conn.execute_batch("BEGIN IMMEDIATE; ALTER TABLE files ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0; CREATE INDEX file_source ON files(source_id); PRAGMA user_version=3; COMMIT;")?;
         }
         Ok(Self { conn })
     }
@@ -118,7 +135,7 @@ impl Store {
             .optional()?;
         if old.as_deref() != Some(pipeline) {
             self.conn.execute(
-                "UPDATE files SET state='pending' WHERE folder=0 AND state='indexed'",
+                "UPDATE files SET state='pending',error='' WHERE folder=0",
                 [],
             )?;
             self.conn.execute("INSERT INTO metadata VALUES('pipeline',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[pipeline])?;
@@ -127,13 +144,13 @@ impl Store {
     }
 
     pub fn discover(&self, file: &FileRecord, generation: i64) -> Result<()> {
-        self.conn.execute("INSERT INTO files(uri,path,name,mime,folded,stamp,size,folder,seen,state)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+        self.conn.execute("INSERT INTO files(uri,path,name,mime,folded,stamp,size,folder,seen,state,source_id)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
             ON CONFLICT(uri) DO UPDATE SET path=excluded.path,name=excluded.name,mime=excluded.mime,folded=excluded.folded,
-            size=excluded.size,folder=excluded.folder,seen=excluded.seen,
+            size=excluded.size,folder=excluded.folder,seen=CASE WHEN ?9<0 THEN files.seen ELSE excluded.seen END,source_id=CASE WHEN excluded.source_id!=0 THEN excluded.source_id ELSE files.source_id END,
             state=CASE WHEN files.stamp!=excluded.stamp THEN excluded.state ELSE files.state END,stamp=excluded.stamp",
             params![file.uri, file.path.to_string_lossy(), file.name, file.mime, folded(&file.path.to_string_lossy()),
-                file.stamp, i64::try_from(file.size).unwrap_or(i64::MAX), file.folder, generation, if file.folder { "indexed" } else { "pending" }])?;
+                file.stamp, i64::try_from(file.size).unwrap_or(i64::MAX), file.folder, generation, if file.folder { "indexed" } else { "pending" },file.source_id])?;
         Ok(())
     }
 
@@ -142,6 +159,43 @@ impl Store {
             .execute("DELETE FROM files WHERE seen!=?1", [generation])?;
         // Keep content-addressed vectors briefly, so renames and moves don't require inference again.
         self.conn.execute("DELETE FROM contents WHERE created<?1 AND id NOT IN (SELECT content FROM files WHERE content IS NOT NULL)", [now()-7*86400])?;
+        Ok(())
+    }
+    pub fn refresh(&self, file: &FileRecord) -> Result<()> {
+        self.discover(file, -1)
+    }
+    pub fn remove_file(&self, uri: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM files WHERE uri=?1", [uri])?;
+        Ok(())
+    }
+
+    pub fn apply_changes(&self, ids: &[i64], records: &[FileRecord]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let seen: std::collections::HashSet<_> = records.iter().map(|f| f.uri.as_str()).collect();
+        for id in ids {
+            let mut stmt = tx.prepare("SELECT uri FROM files WHERE source_id=?1")?;
+            let old = stmt
+                .query_map([id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for uri in old {
+                if !seen.contains(uri.as_str()) {
+                    tx.execute("DELETE FROM files WHERE uri=?1", [uri])?;
+                }
+            }
+        }
+        let generation = self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM metadata WHERE key='scan'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        for file in records {
+            self.discover(file, generation)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -163,6 +217,7 @@ impl Store {
 
     fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
         Ok(FileRecord {
+            source_id: 0,
             uri: row.get(0)?,
             path: PathBuf::from(row.get::<_, String>(1)?),
             name: row.get(2)?,
@@ -188,7 +243,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM contents WHERE id=?1 AND pipeline=?2",
+                "SELECT 1 FROM contents WHERE id=?1 AND pipeline=?2 AND complete=1",
                 params![content, pipeline],
                 |_| Ok(true),
             )
@@ -210,20 +265,59 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM contents WHERE id=?1", [content])?;
         tx.execute(
-            "INSERT INTO contents VALUES(?1,?2,?3)",
+            "INSERT INTO contents(id,pipeline,created,complete) VALUES(?1,?2,?3,1)",
             params![content, pipeline, now()],
         )?;
-        for chunk in chunks {
+        for (part, chunk) in chunks.iter().enumerate() {
             let bytes = chunk
                 .vector
                 .as_ref()
                 .map(|v| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>());
             tx.execute(
-                "INSERT INTO chunks(content,text,vector,page,seconds) VALUES(?1,?2,?3,?4,?5)",
-                params![content, chunk.text, bytes, chunk.page, chunk.seconds],
+                "INSERT INTO chunks(content,text,vector,page,seconds,part) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![content, chunk.text, bytes, chunk.page, chunk.seconds,part as i64],
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn content_progress(&self, content: &str) -> Result<usize> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM chunks WHERE content=?1",
+            [content],
+            |r| r.get::<_, i64>(0),
+        )? as usize)
+    }
+    pub fn checkpoint(
+        &self,
+        content: &str,
+        pipeline: &str,
+        part: usize,
+        chunk: &StoredChunk,
+    ) -> Result<()> {
+        if let Some(v) = &chunk.vector {
+            validate_vector(v)?;
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO contents(id,pipeline,created,complete) VALUES(?1,?2,?3,0)",
+            params![content, pipeline, now()],
+        )?;
+        let bytes = chunk
+            .vector
+            .as_ref()
+            .map(|v| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>());
+        self.conn.execute("INSERT OR IGNORE INTO chunks(content,text,vector,page,seconds,part) VALUES(?1,?2,?3,?4,?5,?6)",params![content,chunk.text,bytes,chunk.page,chunk.seconds,part as i64])?;
+        Ok(())
+    }
+    pub fn finish_content(&self, content: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE contents SET complete=1 WHERE id=?1", [content])?;
+        Ok(())
+    }
+    pub fn discard_incomplete(&self, content: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM contents WHERE id=?1 AND complete=0", [content])?;
         Ok(())
     }
 
@@ -496,6 +590,7 @@ mod tests {
             ..Default::default()
         };
         let f = FileRecord {
+            source_id: 1,
             uri,
             path,
             name: "Lease.txt".into(),
@@ -613,6 +708,92 @@ mod tests {
         store.activate_pipeline("new")?;
         assert_eq!(store.counts()?.pending, 1);
         assert!(store.file(&f.uri)?.is_some());
+        Ok(())
+    }
+    #[test]
+    fn checkpoints_survive_restart_and_only_completed_content_is_reused() -> Result<()> {
+        let (directory, _, _, file) = fixture()?;
+        let path = directory.path().join("checkpoints.sqlite");
+        let chunk = StoredChunk {
+            text: "First page".into(),
+            vector: Some(query_vector()),
+            page: Some(1),
+            seconds: None,
+        };
+        {
+            let store = Store::open(&path)?;
+            store.discover(&file, 1)?;
+            store.checkpoint("pipeline:hash", "pipeline", 0, &chunk)?;
+            store.checkpoint("pipeline:hash", "pipeline", 0, &chunk)?;
+            assert_eq!(store.content_progress("pipeline:hash")?, 1);
+            assert!(!store.cached("pipeline:hash", "pipeline")?);
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(store.content_progress("pipeline:hash")?, 1);
+        assert_eq!(store.counts()?.pending, 1);
+        store.checkpoint("pipeline:hash", "pipeline", 1, &chunk)?;
+        store.finish_content("pipeline:hash")?;
+        store.complete(&file.uri, "pipeline:hash")?;
+        store.discard_incomplete("pipeline:hash")?;
+        assert!(store.cached("pipeline:hash", "pipeline")?);
+        store.checkpoint("pipeline:changed", "pipeline", 0, &chunk)?;
+        store.discard_incomplete("pipeline:changed")?;
+        assert_eq!(store.content_progress("pipeline:changed")?, 0);
+        Ok(())
+    }
+    #[test]
+    fn resource_updates_handle_rename_delete_and_preserve_scan_membership() -> Result<()> {
+        let (_directory, store, _, mut file) = fixture()?;
+        let generation = store.start_scan()?;
+        store.discover(&file, generation)?;
+        let old_uri = file.uri.clone();
+        file.uri.push_str("-renamed");
+        file.name = "Renamed.txt".into();
+        store.apply_changes(&[file.source_id], &[file.clone()])?;
+        assert!(store.file(&old_uri)?.is_none());
+        store.refresh(&file)?;
+        store.finish_scan(generation)?;
+        assert!(store.file(&file.uri)?.is_some());
+        store.apply_changes(&[file.source_id], &[])?;
+        assert_eq!(store.counts()?.files, 0);
+        Ok(())
+    }
+    #[test]
+    fn migrations_preserve_existing_content_and_make_it_resumable() -> Result<()> {
+        for version in [1, 2] {
+            let (directory, _, _, file) = fixture()?;
+            let path = directory.path().join("older.sqlite");
+            {
+                let mut store = Store::open(&path)?;
+                store.discover(&file, 1)?;
+                store.save_content(
+                    "hash",
+                    "pipeline",
+                    &[StoredChunk {
+                        text: "Existing page".into(),
+                        vector: Some(query_vector()),
+                        page: Some(3),
+                        seconds: None,
+                    }],
+                )?;
+                store.complete(&file.uri, "hash")?;
+                store.conn.execute_batch(
+                    "DROP INDEX file_source; ALTER TABLE files DROP COLUMN source_id;",
+                )?;
+                if version == 1 {
+                    store.conn.execute_batch("DROP INDEX chunk_part; ALTER TABLE chunks DROP COLUMN part; ALTER TABLE contents DROP COLUMN complete;")?;
+                }
+                store.conn.pragma_update(None, "user_version", version)?;
+            }
+            let store = Store::open(&path)?;
+            assert!(store.cached("hash", "pipeline")?);
+            assert_eq!(store.content_progress("hash")?, 1);
+            assert_eq!(store.counts()?.indexed, 1);
+            let part: i64 = store
+                .conn
+                .query_row("SELECT part FROM chunks", [], |row| row.get(0))?;
+            assert_eq!(part, 0);
+        }
         Ok(())
     }
     #[test]

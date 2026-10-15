@@ -46,7 +46,7 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src -e BACKEND -e ARCH "$IMAGE" bash -c '
             set -euo pipefail
             apt-get update
-            apt-get install -y --no-install-recommends git cmake ninja-build python3 patchelf
+            apt-get install -y --no-install-recommends git cmake ninja-build python3 patchelf clang
             git config --global --add safe.directory "*"
             export PATH=/opt/rocm/bin:/usr/local/cuda/bin:$PATH
             export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}

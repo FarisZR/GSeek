@@ -281,7 +281,7 @@ impl Window {
         let weak = Rc::downgrade(&ui);
         start.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                ui.preferences(true);
+                ui.setup();
             }
         });
         let weak = Rc::downgrade(&ui);
@@ -336,7 +336,7 @@ impl Window {
         let weak = Rc::downgrade(&ui);
         preferences.connect_activate(move |_, _| {
             if let Some(ui) = weak.upgrade() {
-                ui.preferences(false);
+                ui.preferences(None);
             }
         });
         app.add_action(&preferences);
@@ -406,8 +406,14 @@ impl Window {
                                 "welcome"
                             },
                         );
-                        ui.banner.set_revealed(!s.ready || s.state == "error");
-                        ui.banner.set_title(&s.detail);
+                        ui.banner.set_revealed(
+                            !s.ready || s.state == "error" || !s.discovery_error.is_empty(),
+                        );
+                        ui.banner.set_title(if s.discovery_error.is_empty() {
+                            &s.detail
+                        } else {
+                            &s.discovery_error
+                        });
                         let title = match s.state.as_str() {
                             "setup" => "Setting Up Search",
                             "discovering" => "Finding Your Files",
@@ -418,7 +424,11 @@ impl Window {
                             _ => "Welcome to GSeek",
                         };
                         ui.status_title.set_text(title);
-                        ui.status_detail.set_text(&s.detail);
+                        ui.status_detail.set_text(&if s.discovery_error.is_empty() {
+                            s.detail.clone()
+                        } else {
+                            format!("{}\n{}", s.detail, s.discovery_error)
+                        });
                         ui.counts.set_text(&format!(
                             "{} files · {} indexed · {} queued · {} failed",
                             s.counts.files, s.counts.indexed, s.counts.pending, s.counts.failed
@@ -562,7 +572,54 @@ impl Window {
         self.results.append(&row);
     }
 
-    fn preferences(self: &Rc<Self>, first_run: bool) {
+    fn apply_settings(
+        self: &Rc<Self>,
+        settings: Settings,
+        dialog: &adw::Dialog,
+        button: &gtk::Button,
+    ) {
+        if settings.folders.is_empty() {
+            self.error("Choose at least one search folder.");
+            return;
+        }
+        if let Err(error) = settings.validate() {
+            self.error(&format!("{error:#}"));
+            return;
+        }
+        button.set_sensitive(false);
+        let paths = self.paths.clone();
+        let weak = Rc::downgrade(self);
+        let close = dialog.downgrade();
+        let button = button.clone();
+        spawn(
+            move || {
+                integration::install(&paths, &service::launcher()?)?;
+                service::call(
+                    "Configure",
+                    Some(&(serde_json::to_string(&settings)?,).to_variant()),
+                )?;
+                Ok(())
+            },
+            move |result| {
+                button.set_sensitive(true);
+                if let Some(ui) = weak.upgrade() {
+                    match result {
+                        Ok(()) => {
+                            if let Some(dialog) = close.upgrade() {
+                                dialog.close();
+                            }
+                            ui.main_stack.set_visible_child_name("library");
+                            ui.view_stack.set_visible_child_name("activity");
+                            ui.refresh();
+                        }
+                        Err(error) => ui.error(&format!("{error:#}")),
+                    }
+                }
+            },
+        );
+    }
+
+    fn setup(self: &Rc<Self>) {
         let settings = match self.paths.load() {
             Ok(s) => s,
             Err(e) => {
@@ -571,12 +628,106 @@ impl Window {
             }
         };
         let draft = Rc::new(RefCell::new(settings));
+        let dialog = adw::Dialog::builder()
+            .title("Set Up GSeek")
+            .content_width(600)
+            .content_height(580)
+            .build();
+        let toolbar = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        toolbar.add_top_bar(&header);
+        let content = vertical(24);
+        margins(&content, 24);
+        let intro = label("Your files. Your words.", "title-1");
+        intro.set_xalign(0.0);
+        content.append(&intro);
+        let description = label(
+            "Choose the folders you want to search. GSeek downloads EmbeddingGemma 2 once (865 MB) and keeps your search library on this computer.",
+            "dim-label",
+        );
+        description.set_xalign(0.0);
+        content.append(&description);
+        let locations = adw::PreferencesGroup::builder()
+            .title("Search Locations")
+            .description("Files must also be included in GNOME’s Search Locations.")
+            .build();
+        let folders = gtk::ListBox::new();
+        folders.add_css_class("boxed-list");
+        folders.set_selection_mode(gtk::SelectionMode::None);
+        fill_folders(&folders, &draft, false, self);
+        locations.add(&folders);
+        let add = gtk::Button::with_label("Add Folder…");
+        add.set_valign(gtk::Align::Center);
+        locations.set_header_suffix(Some(&add));
+        connect_folder_picker(&add, &self.window, &folders, &draft, false, self);
+        content.append(&locations);
+        let group = adw::PreferencesGroup::new();
+        let replace = adw::SwitchRow::builder()
+            .title("Use GSeek in GNOME Search")
+            .subtitle("Enable GSeek and disable the Files provider after the model is ready.")
+            .active(true)
+            .build();
+        group.add(&replace);
+        content.append(&group);
+        let privacy = label(
+            "No account. No telemetry. Files stay on this computer.",
+            "dim-label",
+        );
+        privacy.set_xalign(0.0);
+        content.append(&privacy);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&content)
+            .build();
+        toolbar.set_content(Some(&scroller));
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        margins(&footer, 16);
+        let advanced = gtk::Button::with_label("Advanced Setup…");
+        advanced.add_css_class("flat");
+        footer.append(&advanced);
+        let start = gtk::Button::with_label("Download & Start");
+        start.add_css_class("suggested-action");
+        start.set_hexpand(true);
+        footer.append(&start);
+        toolbar.add_bottom_bar(&footer);
+        dialog.set_child(Some(&toolbar));
+        let weak = Rc::downgrade(self);
+        let close = dialog.downgrade();
+        let settings = draft.clone();
+        start.connect_clicked(move |button| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(dialog) = close.upgrade()
+            {
+                let mut s = settings.borrow().clone();
+                s.search_enabled = replace.is_active();
+                ui.apply_settings(s, &dialog, button);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let close = dialog.downgrade();
+        advanced.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                if let Some(dialog) = close.upgrade() {
+                    dialog.close();
+                }
+                ui.preferences(Some(draft.borrow().clone()));
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn preferences(self: &Rc<Self>, initial: Option<Settings>) {
+        let settings = match initial.map(Ok).unwrap_or_else(|| self.paths.load()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error(&format!("{e:#}"));
+                return;
+            }
+        };
+        let draft = Rc::new(RefCell::new(settings));
         let dialog = adw::PreferencesDialog::builder()
-            .title(if first_run {
-                "Set Up GSeek"
-            } else {
-                "Preferences"
-            })
+            .title("Preferences")
             .content_width(680)
             .content_height(650)
             .build();
@@ -647,17 +798,13 @@ impl Window {
             .subtitle(
                 "Enable GSeek and disable the Files search provider. LocalSearch keeps running.",
             )
-            .active(first_run || draft.borrow().search_enabled)
+            .active(draft.borrow().search_enabled)
             .build();
         integration_group.add(&replace);
         integration_group.add(&scope);
         page.add(&integration_group);
         let apply_group = adw::PreferencesGroup::new();
-        let apply = gtk::Button::with_label(if first_run {
-            "Download Model & Start"
-        } else {
-            "Apply Changes"
-        });
+        let apply = gtk::Button::with_label("Apply Changes");
         apply.add_css_class("suggested-action");
         apply_group.add(&apply);
         page.add(&apply_group);
@@ -816,47 +963,10 @@ impl Window {
             } else {
                 None
             };
-            if settings.folders.is_empty() {
-                ui.error("Choose at least one search folder.");
-                return;
-            }
-            if let Err(e) = settings.validate() {
-                ui.error(&format!("{e:#}"));
-                return;
-            }
-            button.set_sensitive(false);
             settings.search_enabled = replace.is_active();
-            let paths = ui.paths.clone();
-            let weak = Rc::downgrade(&ui);
-            let close = close.clone();
-            let button = button.clone();
-            spawn(
-                move || {
-                    integration::install(&paths, &service::launcher()?)?;
-                    service::call(
-                        "Configure",
-                        Some(&(serde_json::to_string(&settings)?,).to_variant()),
-                    )?;
-
-                    Ok(())
-                },
-                move |result| {
-                    button.set_sensitive(true);
-                    if let Some(ui) = weak.upgrade() {
-                        match result {
-                            Ok(()) => {
-                                if let Some(dialog) = close.upgrade() {
-                                    dialog.close();
-                                }
-                                ui.main_stack.set_visible_child_name("library");
-                                ui.view_stack.set_visible_child_name("activity");
-                                ui.refresh();
-                            }
-                            Err(e) => ui.error(&format!("{e:#}")),
-                        }
-                    }
-                },
-            );
+            if let Some(dialog) = close.upgrade() {
+                ui.apply_settings(settings, dialog.upcast_ref(), button);
+            }
         });
         dialog.present(Some(&self.window));
     }
@@ -1015,9 +1125,17 @@ mod tests {
     }
     fn capture(window: &adw::ApplicationWindow, path: &Path) {
         let paintable = gtk::WidgetPaintable::new(Some(window));
-        let snapshot = gtk::Snapshot::new();
-        paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
-        let node = snapshot.to_node().expect("Window has a rendered scene");
+        let mut node = None;
+        until(|| {
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+            node = snapshot.to_node();
+            if node.is_none() {
+                window.queue_draw();
+            }
+            node.is_some()
+        });
+        let node = node.unwrap();
         let renderer = window.renderer().expect("Window has a renderer");
         renderer
             .render_texture(&node, None)
@@ -1067,7 +1185,7 @@ mod tests {
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("activity.png"));
         }
-        ui.preferences(false);
+        ui.preferences(None);
         until(|| ui.window.visible_dialog().is_some());
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(400));

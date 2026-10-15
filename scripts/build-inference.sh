@@ -16,6 +16,18 @@ else
   git -C "$source_dir" apply --reverse --check "$patch"
 fi
 args=()
+if [[ $(uname -m) == aarch64 && -z "${CC:-}" ]]; then
+  # CPU variants include ARMv9.2/SME, which GCC 13 cannot compile. Pick a compiler
+  # that accepts those instructions; the runtime still selects the host's actual ISA.
+  for pair in gcc-14:g++-14 clang:clang++; do
+    if command -v "${pair%%:*}" >/dev/null && command -v "${pair##*:}" >/dev/null &&
+      echo 'int main(void) { return 0; }' | "${pair%%:*}" -x c -march=armv9.2-a+sme -c -o /dev/null - 2>/dev/null; then
+      export CC=${pair%%:*} CXX=${pair##*:}
+      args+=("-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX")
+      break
+    fi
+  done
+fi
 case "$backend" in
   vulkan) args+=(-DGGML_VULKAN=ON);;
   cuda) args+=(-DGGML_CUDA=ON "-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS:-75;80;86;89;90}");;

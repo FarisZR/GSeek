@@ -123,12 +123,7 @@ impl External {
         {
             bail!("Use an endpoint without credentials, query parameters, or a fragment");
         }
-        let local = match url.host() {
-            Some(url::Host::Domain("localhost")) => true,
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            _ => false,
-        };
+        let local = is_loopback(&url);
         if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
             bail!("Use an HTTP or HTTPS endpoint");
         }
@@ -139,6 +134,15 @@ impl External {
             bail!("Choose an EmbeddingGemma 2 model identifier");
         }
         Ok(url)
+    }
+}
+
+pub fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
     }
 }
 
