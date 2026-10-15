@@ -462,7 +462,12 @@ mod tests {
         let paths = Paths::from_env();
         paths.init()?;
         model::ensure(&paths, |_, _, _| Ok(()))?;
-        let mut runtime = Runtime::new(&paths, &paths.load()?, true);
+        let mut settings = paths.load()?;
+        settings.external = None;
+        if settings.backend == Backend::Auto {
+            settings.backend = Backend::Cpu;
+        }
+        let mut runtime = Runtime::new(&paths, &settings, true);
         let input = Input::Text {
             text: "task: search result | query: the clause about pets in the lease".into(),
         };
