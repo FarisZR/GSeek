@@ -198,6 +198,20 @@ impl Worker {
             }
         }
         let mut cmd = Command::new(dir.join("gseek-inference"));
+        use std::os::unix::process::CommandExt;
+        // SAFETY: prctl/getppid are async-signal-safe on Linux. A crashed or stopped service
+        // must not leave a model process holding GPU memory after its parent disappears.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() == 1 {
+                    libc::raise(libc::SIGKILL);
+                }
+                Ok(())
+            });
+        }
         let log_path = paths.data.join("inference.log");
         if fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) > 2 * 1024 * 1024 {
             let _ = fs::rename(&log_path, paths.data.join("inference.previous.log"));
@@ -228,10 +242,10 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);
-        if backend == Backend::Rocm {
-            if let Some(v) = &settings.rocm_override {
-                cmd.env("HSA_OVERRIDE_GFX_VERSION", v);
-            }
+        if backend == Backend::Rocm
+            && let Some(v) = &settings.rocm_override
+        {
+            cmd.env("HSA_OVERRIDE_GFX_VERSION", v);
         }
         let mut child = cmd
             .spawn()

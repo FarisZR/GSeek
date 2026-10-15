@@ -30,6 +30,7 @@ struct Window {
     logs: gtk::ListBox,
     pause: gtk::Button,
     generation: Cell<u64>,
+    refreshing: Cell<bool>,
     paths: Paths,
 }
 
@@ -66,10 +67,10 @@ pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
     app.connect_command_line(move |app, command| {
         app.activate();
         let args = command.arguments();
-        if let Some(ui) = state.borrow().as_ref() {
-            if let Some(query) = args.get(1).and_then(|s| s.to_str()) {
-                ui.entry.set_text(query);
-            }
+        if let Some(ui) = state.borrow().as_ref()
+            && let Some(query) = args.get(1).and_then(|s| s.to_str())
+        {
+            ui.entry.set_text(query);
         }
         glib::ExitCode::SUCCESS
     });
@@ -275,6 +276,7 @@ impl Window {
             logs,
             pause,
             generation: Cell::new(0),
+            refreshing: Cell::new(false),
             paths,
         });
 
@@ -317,20 +319,19 @@ impl Window {
         });
         let weak = Rc::downgrade(&ui);
         ui.entry.connect_activate(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                if let Some(row) = ui.results.row_at_index(0) {
-                    ui.results.emit_by_name::<()>("row-activated", &[&row]);
-                }
+            if let Some(ui) = weak.upgrade()
+                && let Some(row) = ui.results.row_at_index(0)
+            {
+                ui.results.emit_by_name::<()>("row-activated", &[&row]);
             }
         });
         let weak = Rc::downgrade(&ui);
         ui.results.connect_row_activated(move |_, row| {
-            if let Some(ui) = weak.upgrade() {
-                if let Some(uri) = row.tooltip_text() {
-                    if let Err(e) = integration::open_result(&ui.paths, &uri) {
-                        ui.error(&format!("{e:#}"));
-                    }
-                }
+            if let Some(ui) = weak.upgrade()
+                && let Some(uri) = row.tooltip_text()
+                && let Err(e) = integration::open_result(&ui.paths, &uri)
+            {
+                ui.error(&format!("{e:#}"));
             }
         });
         let preferences = gio::SimpleAction::new("preferences", None);
@@ -390,9 +391,13 @@ impl Window {
     }
 
     fn refresh(self: &Rc<Self>) {
+        if self.refreshing.replace(true) {
+            return;
+        }
         let weak = Rc::downgrade(self);
         spawn(service::read_status, move |result| {
             if let Some(ui) = weak.upgrade() {
+                ui.refreshing.set(false);
                 match result {
                     Ok(s) => {
                         let configured = ui.paths.load().map(|s| s.configured).unwrap_or(false);
@@ -445,29 +450,29 @@ impl Window {
         if self.view_stack.visible_child_name().as_deref() == Some("activity") {
             let weak = Rc::downgrade(self);
             spawn(service::read_activity, move |result| {
-                if let Some(ui) = weak.upgrade() {
-                    if let Ok(logs) = result {
-                        clear_list(&ui.logs);
-                        for item in logs.iter().take(100) {
-                            let path = url::Url::parse(&item.path)
-                                .ok()
-                                .and_then(|u| u.to_file_path().ok())
-                                .map(|p| p.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| item.path.clone());
-                            let row = adw::ActionRow::builder()
-                                .title(glib::markup_escape_text(&path))
-                                .subtitle(glib::markup_escape_text(&item.detail))
-                                .build();
-                            row.set_title_lines(1);
-                            row.set_subtitle_lines(2);
-                            let icon = gtk::Image::from_icon_name(if item.state == "indexed" {
-                                "emblem-ok-symbolic"
-                            } else {
-                                "dialog-warning-symbolic"
-                            });
-                            row.add_prefix(&icon);
-                            ui.logs.append(&row);
-                        }
+                if let Some(ui) = weak.upgrade()
+                    && let Ok(logs) = result
+                {
+                    clear_list(&ui.logs);
+                    for item in logs.iter().take(100) {
+                        let path = url::Url::parse(&item.path)
+                            .ok()
+                            .and_then(|u| u.to_file_path().ok())
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| item.path.clone());
+                        let row = adw::ActionRow::builder()
+                            .title(glib::markup_escape_text(&path))
+                            .subtitle(glib::markup_escape_text(&item.detail))
+                            .build();
+                        row.set_title_lines(1);
+                        row.set_subtitle_lines(2);
+                        let icon = gtk::Image::from_icon_name(if item.state == "indexed" {
+                            "emblem-ok-symbolic"
+                        } else {
+                            "dialog-warning-symbolic"
+                        });
+                        row.add_prefix(&icon);
+                        ui.logs.append(&row);
                     }
                 }
             });
@@ -512,9 +517,9 @@ impl Window {
                         }
                         Err(e) => {
                             ui.result_state.set_title("Semantic search is unavailable");
-                            ui.result_state.set_description(Some(&format!(
+                            ui.result_state.set_description(Some(&glib::markup_escape_text(&format!(
                                 "{e:#}\n\nOpen Indexing & Activity or retry setup in Preferences."
-                            )));
+                            ))));
                             ui.result_stack.set_visible_child_name("message");
                         }
                     }
@@ -947,21 +952,21 @@ fn connect_folder_picker(
         let draft = draft.clone();
         let weak = weak.clone();
         picker.select_folder(Some(&parent), gio::Cancellable::NONE, move |result| {
-            if let Ok(file) = result {
-                if let Some(path) = file.path() {
-                    let mut s = draft.borrow_mut();
-                    let folders = if excluded {
-                        &mut s.excluded_folders
-                    } else {
-                        &mut s.folders
-                    };
-                    if !folders.contains(&path) {
-                        folders.push(path);
-                    }
-                    drop(s);
-                    if let Some(ui) = weak.upgrade() {
-                        fill_folders(&list, &draft, excluded, &ui);
-                    }
+            if let Ok(file) = result
+                && let Some(path) = file.path()
+            {
+                let mut s = draft.borrow_mut();
+                let folders = if excluded {
+                    &mut s.excluded_folders
+                } else {
+                    &mut s.folders
+                };
+                if !folders.contains(&path) {
+                    folders.push(path);
+                }
+                drop(s);
+                if let Some(ui) = weak.upgrade() {
+                    fill_folders(&list, &draft, excluded, &ui);
                 }
             }
         });
@@ -981,4 +986,93 @@ fn spawn<T: Send + 'static>(
             done(result);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        path::{Path, PathBuf},
+        time::Instant,
+    };
+
+    fn until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            while glib::MainContext::default().pending() {
+                glib::MainContext::default().iteration(false);
+            }
+            if predicate() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "GTK integration condition timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn capture(window: &adw::ApplicationWindow, path: &Path) {
+        let paintable = gtk::WidgetPaintable::new(Some(window));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+        let node = snapshot.to_node().expect("Window has a rendered scene");
+        let renderer = window.renderer().expect("Window has a renderer");
+        renderer
+            .render_texture(&node, None)
+            .save_to_png(path)
+            .unwrap();
+    }
+    #[test]
+    #[ignore = "Needs a display and the real inference fixture; run tests/run-e2e.sh with GSEEK_GUI_TEST_COMMAND"]
+    fn native_views() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("io.github.FarisZR.GSeek.UITest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let ui = Window::build(&app, Paths::from_env());
+        ui.window.present();
+        ui.refresh();
+        until(|| {
+            ui.window.is_mapped()
+                && ui.main_stack.visible_child_name().as_deref() == Some("library")
+        });
+        ui.entry.set_text("the clause about pets in my lease");
+        until(|| {
+            ui.results.first_child().is_some()
+                && ui.result_stack.visible_child_name().as_deref() == Some("results")
+        });
+        assert!(
+            ui.results
+                .first_child()
+                .unwrap()
+                .tooltip_text()
+                .unwrap()
+                .contains("Rental")
+        );
+        let output = std::env::var_os("GSEEK_SCREENSHOT_DIR").map(PathBuf::from);
+        if let Some(dir) = &output {
+            std::fs::create_dir_all(dir).unwrap();
+            capture(&ui.window, &dir.join("search.png"));
+        }
+        ui.view_stack.set_visible_child_name("activity");
+        ui.refresh();
+        until(|| ui.logs.first_child().is_some());
+        // Allow a full frame after changing pages before recording the native widget scene.
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("activity.png"));
+        }
+        ui.preferences(false);
+        until(|| ui.window.visible_dialog().is_some());
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(400));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("preferences.png"));
+        }
+        ui.window.close();
+    }
 }

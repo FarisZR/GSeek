@@ -194,10 +194,10 @@ impl Settings {
         if !(1..=16384).contains(&self.max_file_mb) {
             bail!("File limit must be between 1 and 16384 MB");
         }
-        if let Some(v) = &self.rocm_override {
-            if !matches!(v.as_str(), "10.3.0" | "11.0.0" | "11.0.1" | "12.0.0") {
-                bail!("Unsupported ROCm compatibility override");
-            }
+        if let Some(v) = &self.rocm_override
+            && !matches!(v.as_str(), "10.3.0" | "11.0.0" | "11.0.1" | "12.0.0")
+        {
+            bail!("Unsupported ROCm compatibility override");
         }
         if let Some(external) = &self.external {
             external.validate()?;

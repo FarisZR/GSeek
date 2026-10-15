@@ -38,7 +38,15 @@ struct Api {
     close: Close,
 }
 impl Api {
-    fn load() -> Result<Self> {
+    fn load() -> Result<&'static Self> {
+        // GObject types remain registered for the life of the process. Unloading/reloading
+        // their implementation library would try to register the same types a second time.
+        static API: std::sync::OnceLock<Result<Api, String>> = std::sync::OnceLock::new();
+        API.get_or_init(|| Self::load_once().map_err(|e| format!("{e:#}")))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    fn load_once() -> Result<Self> {
         for name in ["libtinysparql-3.0.so.0", "libtracker-sparql-3.0.so.0"] {
             // SAFETY: only the documented system SONAMEs and stable C ABI are loaded. The Library
             // lives at least as long as every function pointer and GObject created by this adapter.
@@ -278,7 +286,7 @@ mod tests {
     }
     #[test]
     fn symlinks_and_non_files_are_not_read() -> Result<()> {
-        let d = tempfile::tempdir()?;
+        let d = tempfile::Builder::new().prefix("gseek-test-").tempdir()?;
         let target = d.path().join("target.txt");
         fs::write(&target, "hi")?;
         let link = d.path().join("link.txt");

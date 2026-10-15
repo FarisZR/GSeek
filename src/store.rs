@@ -302,7 +302,7 @@ impl Store {
     pub fn search(
         &self,
         query: &str,
-        vector: Option<&[f32]>,
+        vector: &[f32],
         pipeline: &str,
         settings: &Settings,
         limit: usize,
@@ -315,9 +315,7 @@ impl Store {
         if terms.is_empty() {
             return Ok(vec![]);
         }
-        if let Some(v) = vector {
-            validate_vector(v)?;
-        }
+        validate_vector(vector)?;
         let limit = limit.clamp(1, 200);
         let mut hits = HashMap::<String, SearchHit>::new();
         // Bound candidates, but preserve AND matching for filenames/paths.
@@ -358,7 +356,8 @@ impl Store {
             h.score = 2.0 + 1.0 / (rank as f64 + 1.0);
             keep_hit(&mut hits, h, settings);
         }
-        if let Some(v) = vector {
+        {
+            let v = vector;
             // Stream vectors from SQLite's bounded page cache; never materialize the vector database in memory.
             let mut stmt = self.conn.prepare("SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds,c.vector FROM chunks c
                 JOIN files f ON f.content=c.content JOIN contents p ON p.id=c.content WHERE c.vector IS NOT NULL AND p.pipeline=?1")?;
@@ -369,21 +368,22 @@ impl Store {
                     continue;
                 }
                 let score: f64 = bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .zip(v)
-                    .map(|(b, q)| f32::from_le_bytes(b.try_into().unwrap()) as f64 * *q as f64)
+                    .map(|(b, q)| f32::from_le_bytes(*b) as f64 * *q as f64)
                     .sum();
                 if score < 0.30 || !score.is_finite() {
                     continue;
                 }
-                if hits.len() >= limit * 4 && !hits.contains_key(&r.get::<_, String>(0)?) {
-                    if let Some((_, lowest)) =
+                if hits.len() >= limit * 4
+                    && !hits.contains_key(&r.get::<_, String>(0)?)
+                    && let Some((_, lowest)) =
                         hits.iter().min_by(|a, b| a.1.score.total_cmp(&b.1.score))
-                    {
-                        if score <= lowest.score {
-                            continue;
-                        }
-                    }
+                    && score <= lowest.score
+                {
+                    continue;
                 }
                 keep_hit(
                     &mut hits,
@@ -455,8 +455,13 @@ pub fn validate_vector(v: &[f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn query_vector() -> Vec<f32> {
+        let mut v = vec![0.0; DIMENSIONS];
+        v[0] = 1.0;
+        v
+    }
     fn fixture() -> Result<(tempfile::TempDir, Store, Settings, FileRecord)> {
-        let d = tempfile::tempdir()?;
+        let d = tempfile::Builder::new().prefix("gseek-test-").tempdir()?;
         let path = d.path().join("Lease.txt");
         std::fs::write(&path, "cats welcome")?;
         let uri = url::Url::from_file_path(&path).unwrap().to_string();
@@ -476,7 +481,7 @@ mod tests {
         Ok((d, Store::open(Path::new(":memory:"))?, s, f))
     }
     #[test]
-    fn keyword_search_works_without_runtime_and_survives_reopen() -> Result<()> {
+    fn exact_words_join_valid_embeddings_and_survive_reopen() -> Result<()> {
         let (d, _, s, f) = fixture()?;
         let db = d.path().join("index.sqlite");
         {
@@ -495,13 +500,20 @@ mod tests {
             store.complete(&f.uri, "hash")?;
         }
         let store = Store::open(&db)?;
-        assert_eq!(store.search("lease", None, "", &s, 20)?.len(), 1);
+        assert_eq!(store.search("lease", &query_vector(), "", &s, 20)?.len(), 1);
         assert_eq!(
-            store.search("cats welcome", None, "", &s, 20)?[0].page,
+            store.search("cats welcome", &query_vector(), "", &s, 20)?[0].page,
             Some(2)
         );
-        assert_eq!(store.search("الفاتورة", None, "", &s, 20)?.len(), 1);
-        assert!(store.search("cats unknown", None, "", &s, 20)?.is_empty());
+        assert_eq!(
+            store.search("الفاتورة", &query_vector(), "", &s, 20)?.len(),
+            1
+        );
+        assert!(
+            store
+                .search("cats unknown", &query_vector(), "", &s, 20)?
+                .is_empty()
+        );
         Ok(())
     }
     #[test]
@@ -554,11 +566,11 @@ mod tests {
             ],
         )?;
         store.complete(&f.uri, "h")?;
-        assert_eq!(store.search("pets", Some(&v), "p", &s, 20)?.len(), 1);
-        assert!(store.search("lease.txt", Some(&v), "p", &s, 20)?[0].score > 4.0);
+        assert_eq!(store.search("pets", &v, "p", &s, 20)?.len(), 1);
+        assert!(store.search("lease.txt", &v, "p", &s, 20)?[0].score > 4.0);
         assert!(
             store
-                .search("concept", Some(&v), "different-model", &s, 20)?
+                .search("concept", &v, "different-model", &s, 20)?
                 .is_empty()
         );
         Ok(())
@@ -568,7 +580,7 @@ mod tests {
         assert!(validate_vector(&[0.0; DIMENSIONS]).is_err());
         let c = Connection::open_in_memory()?;
         c.execute_batch("PRAGMA user_version=99")?;
-        let d = tempfile::tempdir()?;
+        let d = tempfile::Builder::new().prefix("gseek-test-").tempdir()?;
         let path = d.path().join("newer.db");
         let c = Connection::open(&path)?;
         c.execute_batch("PRAGMA user_version=99")?;
