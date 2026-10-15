@@ -1,0 +1,134 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  GSETTINGS_BACKEND: memory
+
+jobs:
+  native:
+    name: GNOME 51 / ${{ matrix.distro }} / ${{ matrix.backend }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { distro: ubuntu-26.10, image: 'ubuntu:26.10', backend: cpu }
+          - { distro: ubuntu-26.10, image: 'ubuntu:26.10', backend: vulkan }
+          - { distro: fedora-45, image: 'fedora:45', backend: cpu }
+          - { distro: fedora-45, image: 'fedora:45', backend: vulkan }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native dependencies
+        run: bash scripts/ci-deps.sh
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+          bash /tmp/rustup.sh -y --profile minimal --default-toolchain 1.99.0 --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          gnome-shell --version | tee gnome-version.txt
+          gnome-shell --version | grep -E '^GNOME Shell 51\.'
+          pkg-config --modversion gtk4 libadwaita-1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            build
+            .ci-data/gseek/models
+          key: native-${{ matrix.distro }}-${{ matrix.backend }}-${{ hashFiles('Cargo.lock', 'inference/**', 'scripts/build-inference.sh') }}
+          restore-keys: native-${{ matrix.distro }}-${{ matrix.backend }}-
+      - name: Check formatting and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Unit and contract tests
+        run: |
+          cargo test --locked --all-targets
+          cargo test --locked --no-default-features --lib
+          cargo build --locked
+      - name: Build pinned inference backend
+        run: bash scripts/build-inference.sh '${{ matrix.backend }}'
+      - name: Test real embeddings, readers, D-Bus, and GTK
+        shell: bash
+        env:
+          GSK_RENDERER: cairo
+          GSEEK_TEST_BACKEND: ${{ matrix.backend }}
+          GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
+          GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
+          GSEEK_GUI_TEST_COMMAND: cargo test --lib ui::tests::native_views -- --ignored --test-threads=1
+          XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
+          XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
+          XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
+          GSEEK_RUNTIME_DIR: ${{ github.workspace }}/dist/runtime
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_CONFIG_HOME/gseek" artifacts
+          printf '{"backend":"%s"}\n' '${{ matrix.backend }}' > "$XDG_CONFIG_HOME/gseek/settings.json"
+          if [[ '${{ matrix.backend }}' == vulkan ]]; then
+            export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
+            vulkaninfo --summary
+          fi
+          cargo test --locked --test real_inference -- --ignored --test-threads=1 2>&1 | tee artifacts/inference.log
+          xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/e2e.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-${{ matrix.distro }}-${{ matrix.backend }}
+          path: |
+            artifacts/
+            gnome-version.txt
+          if-no-files-found: warn
+
+  homebrew:
+    name: Homebrew lifecycle / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bottled GNOME dependencies
+        shell: bash
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew update
+          brew install libadwaita tinysparql ffmpeg poppler libarchive pkgconf
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig" >> "$GITHUB_ENV"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: brew-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build the native application with Homebrew libraries
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo build --locked --release
+          mkdir -p dist/runtime/{cpu,vulkan}
+          # The lifecycle test checks registration and launch, independently of inference build jobs.
+          printf '#!/bin/sh\nexit 1\n' > dist/runtime/cpu/gseek-inference
+          cp dist/runtime/cpu/gseek-inference dist/runtime/vulkan/
+          bash scripts/package.sh
+          python3 scripts/test-homebrew.py

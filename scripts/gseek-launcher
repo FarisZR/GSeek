@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+self=$(readlink -f "${BASH_SOURCE[0]}")
+bundle=$(cd "$(dirname "$self")/.." && pwd)
+if [[ -f "$bundle/homebrew-prefix" ]]; then
+  IFS= read -r brew_prefix < "$bundle/homebrew-prefix"
+  export LD_LIBRARY_PATH="$brew_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export PATH="$brew_prefix/bin:$PATH"
+  # Keep the host's application database, icon theme, and GNOME schemas available.
+  export XDG_DATA_DIRS="$brew_prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+fi
+export GSEEK_LAUNCHER="$self"
+export GSEEK_RUNTIME_DIR="$bundle/runtime"
+export GSEEK_RUNTIME_MANIFEST="$bundle/runtime-manifest.json"
+exec "$bundle/bin/gseek-native" "$@"

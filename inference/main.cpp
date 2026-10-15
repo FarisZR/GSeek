@@ -40,6 +40,14 @@ public:
         mtmd_helper_log_set(log_message, nullptr);
         if (backends) ggml_backend_load_all_from_path(backends); else ggml_backend_load_all();
         llama_backend_init();
+        if (gpu) {
+            bool found = false;
+            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                const auto type = ggml_backend_dev_type(ggml_backend_dev_get(i));
+                found |= type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+            }
+            require(found, "No compatible GPU was found for this backend");
+        }
         auto mp = llama_model_default_params(); mp.n_gpu_layers = gpu ? 999 : 0;
         model.reset(llama_model_load_from_file(text, mp)); require(bool(model), "Cannot load EmbeddingGemma 2 weights");
         auto cp = llama_context_default_params();

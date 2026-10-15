@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      gnome-bindings:
+        patterns: ["glib*", "gio*", "gtk*", "gdk*", "gsk*", "libadwaita*", "pango*", "cairo*", "graphene*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
