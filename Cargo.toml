@@ -1,0 +1,43 @@
+[package]
+name = "gseek"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Find your files by what you remember, from GNOME Search"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/FarisZR/GSeek"
+
+[features]
+default = ["gui"]
+gui = ["dep:gtk", "dep:adw"]
+
+[dependencies]
+anyhow = "1.0"
+async-channel = "2.5"
+clap = { version = "4.5", features = ["derive"] }
+gio = { version = "0.22.10", features = ["v2_74"] }
+glib = "0.22"
+gtk = { package = "gtk4", version = "0.11.5", features = ["v4_12"], optional = true }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_5"], optional = true }
+libloading = "0.8"
+libc = "0.2"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls", "native-certs", "json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.23"
+unicode-normalization = "0.1"
+url = "2.5"
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
