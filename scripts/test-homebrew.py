@@ -28,9 +28,11 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
     run("git", "-C", str(tap), "add", "Casks/gseek.rb")
     run("git", "-C", str(tap), "-c", "user.name=GSeek CI", "-c", "user.email=ci@example.invalid", "commit", "-m", "Test current GSeek build")
     run("brew", "tap", "--custom-remote", "fariszr/gseek-ci", str(tap))
+    installed = False
     try:
         run("brew", "trust", "fariszr/gseek-ci")
         run("brew", "install", "--cask", "fariszr/gseek-ci/gseek")
+        installed = True
         run("gseek", "--version")
         gui = subprocess.run(["xvfb-run", "-a", "dbus-run-session", "--", "timeout", "3", "gseek"], text=True, capture_output=True)
         assert gui.returncode == 124, gui.stderr
@@ -49,8 +51,11 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         run("brew", "reinstall", "--cask", "fariszr/gseek-ci/gseek")
         run("gseek", "--version")
         run("brew", "uninstall", "--cask", "gseek")
+        installed = False
         for path in [desktop, service, provider, autostart]:
             assert not path.exists(), f"Stale registration: {path}"
         assert sentinel.is_file()
     finally:
-        run("brew", "untap", "fariszr/gseek-ci")
+        if installed:
+            subprocess.run(["brew", "uninstall", "--cask", "gseek"], check=False)
+        subprocess.run(["brew", "untap", "fariszr/gseek-ci"], check=False)

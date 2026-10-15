@@ -31,12 +31,25 @@ def render(version, url, arm_sha, intel_sha):
   artifact "gseek", target: "~/.local/share/gseek-app"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"
 
-  user_paths = [
-    File.join(Dir.home, ".local/share"),
-    File.join(Dir.home, ".config"),
-    File.join(Dir.home, ".cache"),
-    *ENV.values_at("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"),
-  ].compact.select {{ |path| Pathname.new(path).absolute? }}
+  # Homebrew replaces HOME and preserves desktop variables as HOMEBREW_*.
+  # Give the registration command the actual user's XDG and session paths.
+  integration_env = {{}}
+  {{"XDG_DATA_HOME" => ".local/share", "XDG_CONFIG_HOME" => ".config",
+    "XDG_CACHE_HOME" => ".cache"}}.each do |name, fallback|
+    value = ENV["HOMEBREW_#{{name}}"] || ENV[name]
+    integration_env[name] = if value && Pathname.new(value).absolute?
+      value
+    else
+      File.join(Dir.home, fallback)
+    end
+  end
+  %w[DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR].each do |name|
+    value = ENV["HOMEBREW_#{{name}}"] || ENV[name]
+    integration_env[name] = value if value && !value.empty?
+  end
+  user_paths = [File.join(Dir.home, ".local/share"),
+                *integration_env.values_at("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")].uniq
+
   app_launcher = File.join(Dir.home, ".local/share/gseek-app/bin/gseek")
 
   postflight_steps do
@@ -47,12 +60,14 @@ def render(version, url, arm_sha, intel_sha):
     write_file "~/.local/share/gseek-app/homebrew-prefix", "{{{{HOMEBREW_PREFIX}}}}\\n"
     run app_launcher,
         args: ["integrate"],
+        env: integration_env,
         writable_paths: user_paths
   end
 
   uninstall_preflight_steps do
     run app_launcher,
         args: ["unintegrate"],
+        env: integration_env,
         writable_paths: user_paths
   end
 
