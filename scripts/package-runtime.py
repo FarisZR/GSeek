@@ -44,16 +44,21 @@ while pending:
             pending.append(destination)
 
 if args.backend == "rocm":
-    kernels = sdk / "lib/rocblas/library"
-    if not kernels.is_dir():
-        kernels = sdk / "lib64/rocblas/library"
-    if kernels.is_dir():
-        target = bundle / "rocblas/library"
+    for component in ["rocblas", "hipblaslt"]:
+        kernels = sdk / f"lib/{component}/library"
+        if not kernels.is_dir():
+            kernels = sdk / f"lib64/{component}/library"
+        if not kernels.is_dir():
+            raise RuntimeError(f"The ROCm SDK is missing {component}'s runtime kernel data")
+        target = bundle / component / "library"
         target.mkdir(parents=True, exist_ok=True)
         architectures = ["gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201"]
-        for path in kernels.iterdir():
-            if path.is_file() and ("gfx" not in path.name or any(arch in path.name for arch in architectures)):
-                shutil.copy2(path, target / path.name)
+        for path in kernels.rglob("*"):
+            relative = path.relative_to(kernels)
+            if path.is_file() and ("gfx" not in str(relative) or any(arch in str(relative) for arch in architectures)):
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
 
 licenses = bundle / "licenses"
 licenses.mkdir(exist_ok=True)
