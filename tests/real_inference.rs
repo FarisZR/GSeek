@@ -120,6 +120,13 @@ fn multimodal_vectors_share_one_space() -> Result<()> {
         cosine(&text, &picture) > cosine(&text, &sound),
         "Visual retrieval must rank the matching image above an unrelated tone"
     );
+    let after_media = runtime.query("the clause about pets in the lease")?;
+    let reference: Vec<f32> =
+        serde_json::from_str(include_str!("../data/reference-embedding.json"))?;
+    assert!(
+        cosine(&after_media, &reference) > 0.999,
+        "Growing the encoder context must preserve the text embedding space"
+    );
     Ok(())
 }
 

@@ -28,6 +28,26 @@ class Encoder {
     std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)> batch{nullptr, llama_batch_ext_free};
     int position = 0;
     int max_tokens;
+    int thread_count;
+    int capacity = 0;
+    void reserve(size_t tokens) {
+        require(tokens > 0 && tokens <= static_cast<size_t>(max_tokens), "Input exceeds the embedding context");
+        const int needed = std::min(max_tokens, static_cast<int>((tokens + 127) / 128 * 128));
+        if (!context || capacity < needed) {
+            // Encoder attention graphs grow quadratically. Reserving the full
+            // 2K context for a short note wastes gigabytes on GPU backends.
+            batch.reset(); context.reset();
+            auto cp = llama_context_default_params();
+            cp.n_ctx = cp.n_batch = cp.n_ubatch = needed;
+            cp.n_seq_max = 1; cp.kv_unified = true; cp.embeddings = true;
+            cp.pooling_type = LLAMA_POOLING_TYPE_MEAN;
+            cp.n_threads = cp.n_threads_batch = thread_count;
+            context.reset(llama_init_from_model(model.get(), cp)); require(bool(context), "Cannot initialize embedding context");
+            batch.reset(llama_batch_ext_init(context.get())); require(bool(batch), "Cannot allocate embedding batch");
+            capacity = needed;
+        }
+        llama_batch_ext_clear(batch.get()); position = 0;
+    }
     void placed(int index) {
         require(index >= 0, "Input exceeds the embedding context");
         llama_pos pos[] = {position++, 0, 0, 0};
@@ -36,7 +56,7 @@ class Encoder {
     }
     void token(llama_token id) { placed(llama_batch_ext_add_token(batch.get(), 0, id)); }
 public:
-    Encoder(const char *text, const char *projection, const char *backends, bool gpu, int threads) : max_tokens(projection ? 2048 : 512) {
+    Encoder(const char *text, const char *projection, const char *backends, bool gpu, int threads) : max_tokens(projection ? 2048 : 512), thread_count(threads) {
         llama_log_set(log_message, nullptr);
         mtmd_helper_log_set(log_message, nullptr);
         if (backends) ggml_backend_load_all_from_path(backends); else ggml_backend_load_all();
@@ -51,24 +71,16 @@ public:
         }
         auto mp = llama_model_default_params(); mp.n_gpu_layers = gpu ? 999 : 0;
         model.reset(llama_model_load_from_file(text, mp)); require(bool(model), "Cannot load EmbeddingGemma 2 weights");
-        auto cp = llama_context_default_params();
-        cp.n_ctx = cp.n_batch = cp.n_ubatch = max_tokens;
-        cp.n_seq_max = 1; cp.kv_unified = true; cp.embeddings = true;
-        cp.pooling_type = LLAMA_POOLING_TYPE_MEAN;
-        cp.n_threads = cp.n_threads_batch = threads;
-        context.reset(llama_init_from_model(model.get(), cp)); require(bool(context), "Cannot initialize embedding context");
         if (projection) {
             auto mm = mtmd_context_params_default(); mm.use_gpu = gpu; mm.print_timings = false;
             mm.warmup = false; mm.n_threads = threads; mm.image_min_tokens = 1; mm.image_max_tokens = 1120;
             media.reset(mtmd_init_from_file(projection, model.get(), mm)); require(bool(media), "Cannot load image/audio encoders");
             require(mtmd_support_vision(media.get()) && mtmd_support_audio(media.get()), "Model does not support both images and audio");
         }
-        batch.reset(llama_batch_ext_init(context.get())); require(bool(batch), "Cannot allocate embedding batch");
         require(llama_model_n_embd_out(model.get()) == 768, "Wrong embedding dimensions");
     }
 
     std::vector<float> embed(const json &input) {
-        llama_batch_ext_clear(batch.get()); position = 0;
         const auto kind = input.at("kind").get<std::string>();
         if (kind == "text") {
             const auto text = input.at("text").get<std::string>();
@@ -80,6 +92,7 @@ public:
             require(count > 0, "Cannot tokenize input");
             tokens.resize(count);
             if (count > max_tokens) { tokens.resize(max_tokens); tokens.back() = llama_vocab_eos(vocab); }
+            reserve(tokens.size());
             for (auto id : tokens) token(id);
         } else {
             require(bool(media), "This is a text-only query encoder");
@@ -95,6 +108,10 @@ public:
             std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)> chunks(mtmd_input_chunks_init(), mtmd_input_chunks_free);
             const mtmd_bitmap *bitmaps[] = {bitmap.get()};
             require(mtmd_tokenize(media.get(), chunks.get(), &text, bitmaps, 1) == 0, "Cannot tokenize media input");
+            size_t total = 0;
+            for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i)
+                total += mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks.get(), i));
+            reserve(total);
             for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
                 const auto *chunk = mtmd_input_chunks_get(chunks.get(), i);
                 if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
