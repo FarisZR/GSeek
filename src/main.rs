@@ -54,7 +54,11 @@ fn run() -> Result<()> {
         Some(Action::Service) => service::run(paths),
         Some(Action::Integrate { launcher }) => {
             service::stop_running();
-            gseek::integration::install(&paths, &launcher.unwrap_or(service::launcher()?))
+            let launcher = match launcher {
+                Some(path) => path,
+                None => service::launcher()?,
+            };
+            gseek::integration::install(&paths, &launcher)
         }
         Some(Action::Unintegrate) => {
             service::stop_running();

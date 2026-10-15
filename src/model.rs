@@ -94,6 +94,20 @@ pub fn download_verified(
     {
         bail!("Invalid download metadata");
     }
+    let lock_path = dest.with_file_name(format!(
+        "{}.lock",
+        dest.file_name()
+            .context("Download destination needs a filename")?
+            .to_string_lossy()
+    ));
+    let download_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(lock_path)?;
+    download_lock.lock()?;
     if verify_download(dest, bytes, sha256)? {
         return Ok(());
     }

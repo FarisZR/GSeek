@@ -10,6 +10,7 @@ use std::{
     collections::VecDeque,
     fs,
     io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
@@ -235,6 +236,14 @@ fn install_runtime(paths: &Paths, backend: &str) -> Result<PathBuf> {
     }
     let root = paths.data.join("runtimes");
     fs::create_dir_all(&root)?;
+    let install_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(root.join(format!("{backend}.lock")))?;
+    install_lock.lock()?;
     let dest = root.join(format!("{backend}-{}", &asset.sha256[..16]));
     if dest.join("gseek-inference").is_file() {
         return Ok(dest);
