@@ -26,7 +26,7 @@ def render(version, url, arm_sha, intel_sha):
   homepage "https://github.com/FarisZR/GSeek"
 
   depends_on :linux
-  depends_on formula: %w[ffmpeg poppler libarchive]
+  depends_on formula: %w[ffmpeg poppler libarchive openssl@3]
 
   artifact "gseek", target: "~/.local/share/gseek-app"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"

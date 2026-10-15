@@ -73,7 +73,8 @@ Integration tracks checksums and the previous Files/GSeek provider settings.
 Uninstallation removes only unchanged owned files and restores only those settings
 it changed. Index data survives. The launcher uses host GTK/GLib/LocalSearch; it
 does not override those libraries with Homebrew copies. Homebrew provides media
-readers. All inference backends are downloaded directly from official llama.cpp
+readers and the upstream runtime’s OpenSSL 3 ABI dependency. The launcher passes
+Homebrew’s OpenSSL directory only to the inference child. All inference backends are downloaded directly from official llama.cpp
 release assets. The embedded `data/runtimes.json` pins release URLs, exact sizes,
 and checksums for CPU, Vulkan, and CUDA on both architectures. CUDA includes its
 upstream redistributable libraries. GSeek verifies downloads, serializes installation,
