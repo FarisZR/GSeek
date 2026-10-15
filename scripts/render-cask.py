@@ -31,25 +31,34 @@ def render(version, url, arm_sha, intel_sha):
   artifact "gseek", target: "~/.local/share/gseek-app"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"
 
-  postflight do
-    system_command "/usr/bin/install",
-                   args: ["-D", "-m", "644", (staged_path/"gseek-search-provider.ini").to_s,
-                          "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
-                   sudo: true,
-                   must_succeed: true
-    bundle = Pathname.new(Dir.home)/".local/share/gseek-app"
-    (bundle/"homebrew-prefix").write("#{{HOMEBREW_PREFIX}}\\n")
-    system_command bundle/"bin/gseek",
-                   args: ["integrate", "--launcher", (bundle/"bin/gseek").to_s],
-                   must_succeed: true
+  user_paths = [
+    File.join(Dir.home, ".local/share"),
+    File.join(Dir.home, ".config"),
+    File.join(Dir.home, ".cache"),
+    *ENV.values_at("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"),
+  ].compact.select {{ |path| Pathname.new(path).absolute? }}
+
+  postflight_steps do
+    run "/usr/bin/install",
+        args: ["-D", "-m", "644", "{{{{staged_path}}}}/gseek-search-provider.ini",
+               "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
+        sudo: true,
+        writable_paths: ["/usr/local/share/gnome-shell/search-providers"]
+    write_file "~/.local/share/gseek-app/homebrew-prefix", "{{{{HOMEBREW_PREFIX}}}}\\n"
+    run "~/.local/share/gseek-app/bin/gseek",
+        args: ["integrate"],
+        writable_paths: user_paths
   end
 
-  uninstall script: {{
-    executable: "#{{Dir.home}}/.local/share/gseek-app/bin/gseek",
-    args: ["unintegrate"],
-    sudo: false,
-  }},
-  delete: "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"
+  uninstall_preflight_steps do
+    run "~/.local/share/gseek-app/bin/gseek",
+        args: ["unintegrate"],
+        writable_paths: user_paths
+  end
+
+  uninstall_postflight_steps do
+    remove "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini", sudo: true
+  end
 
   caveats <<~EOS
     Open GSeek from your application menu to finish setup. The model downloads
