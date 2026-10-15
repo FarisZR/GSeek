@@ -84,6 +84,15 @@ pub fn skip_reason(file: &FileRecord, settings: &Settings) -> Option<String> {
             settings.max_file_mb
         ));
     }
+    if settings.external.is_some()
+        && ["image/", "audio/", "video/"]
+            .iter()
+            .any(|prefix| file.mime.starts_with(prefix))
+    {
+        return Some(
+            "External endpoints support text only; use managed inference for this file".into(),
+        );
+    }
     if file.mime.starts_with("image/") && !settings.images {
         return Some("Image indexing is disabled".into());
     }
@@ -236,7 +245,9 @@ pub fn read(
         if pages > 5000 {
             bail!("PDF exceeds the 5,000 page limit");
         }
-        // Every PDF page gets a visual embedding, including scans; extracted words also get exact-text search.
+        // Managed inference embeds each visual page, including scans. External
+        // text-only endpoints receive extractable text, never an assumed image API.
+        let mut found_text = false;
         for page in 1..=pages {
             let index = page.to_string();
             let words = run_output(
@@ -249,12 +260,16 @@ pub fn read(
             )?;
             let words = String::from_utf8_lossy(&words).into_owned();
             for chunk in text_parts(&words) {
+                found_text = true;
                 consume(Part {
                     input: text_document(&file.name, &chunk),
                     text: chunk,
                     page: Some(page),
                     seconds: None,
                 })?;
+            }
+            if settings.external.is_some() {
+                continue;
             }
             let image = temp.path().join("page.png");
             run_output(
@@ -283,6 +298,9 @@ pub fn read(
                 seconds: None,
             })?;
             fs::remove_file(image)?;
+        }
+        if settings.external.is_some() && !found_text {
+            bail!("This PDF has no extractable text. Use managed inference for scanned pages.");
         }
         return Ok(());
     }

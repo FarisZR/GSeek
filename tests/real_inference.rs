@@ -186,6 +186,30 @@ fn pdf_video_and_document_readers_keep_locations() -> Result<()> {
         Ok(())
     })?;
     assert_eq!(pages, vec![Some(1), Some(2)]);
+    settings.external = Some(gseek::config::External {
+        url: "http://127.0.0.1:8080/v1".into(),
+        model: "embeddinggemma-2".into(),
+        allow_remote: false,
+    });
+    let mut text_pages = vec![];
+    gseek::extract::read(&record, &settings, &paths.cache, |part| {
+        assert!(
+            matches!(part.input, Input::Text { .. }),
+            "Text-only endpoints must not receive visual PDF parts"
+        );
+        text_pages.push(part.page);
+        Ok(())
+    })?;
+    assert_eq!(text_pages, vec![Some(1), Some(2)]);
+    let mut media = record.clone();
+    for mime in ["image/png", "audio/wav", "video/mp4"] {
+        media.mime = mime.into();
+        assert!(
+            gseek::extract::skip_reason(&media, &settings)
+                .unwrap()
+                .contains("text only")
+        );
+    }
     Ok(())
 }
 
