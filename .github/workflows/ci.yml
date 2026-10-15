@@ -96,6 +96,7 @@ jobs:
             vulkaninfo --summary
           fi
           cargo test --locked --test real_inference -- --ignored --test-threads=1 2>&1 | tee artifacts/inference.log
+          cargo test --locked --lib inference::tests::worker_restarts_after_process_failure -- --ignored --test-threads=1 2>&1 | tee artifacts/recovery.log
           xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/e2e.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
