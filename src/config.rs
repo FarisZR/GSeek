@@ -102,10 +102,11 @@ pub struct Settings {
     pub paused: bool,
     pub images: bool,
     pub audio_video: bool,
+    pub search_enabled: bool,
     pub max_file_mb: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct External {
     pub url: String,
     pub model: String,
@@ -171,12 +172,27 @@ impl Default for Settings {
             paused: false,
             images: true,
             audio_video: true,
+            search_enabled: false,
             max_file_mb: 2048,
         }
     }
 }
 
 impl Settings {
+    pub fn location_label(&self, path: &Path) -> String {
+        self.folders
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .map(|root| {
+                let mut label = PathBuf::from(root.file_name().unwrap_or_default());
+                if let Ok(relative) = path.strip_prefix(root) {
+                    label.push(relative);
+                }
+                label.to_string_lossy().into_owned()
+            })
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
             bail!("Unsupported settings version {}", self.version);

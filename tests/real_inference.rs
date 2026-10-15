@@ -27,7 +27,8 @@ fn text_matches_pinned_reference_vector() -> Result<()> {
     let mut runtime = Runtime::new(&paths, &settings, true);
     let vector = runtime.query("the clause about pets in the lease")?;
     validate_vector(&vector)?;
-    let reference: Vec<f32> = serde_json::from_str(include_str!("reference-embedding.json"))?;
+    let reference: Vec<f32> =
+        serde_json::from_str(include_str!("../data/reference-embedding.json"))?;
     let score = cosine(&vector, &reference);
     assert!(
         score > 0.999,

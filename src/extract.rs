@@ -69,6 +69,65 @@ pub fn text_document(_title: &str, text: &str) -> Input {
     }
 }
 
+pub fn skip_reason(file: &FileRecord, settings: &Settings) -> Option<String> {
+    if file.size > settings.max_file_mb * 1024 * 1024 {
+        return Some(format!(
+            "File exceeds the configured {} MB limit",
+            settings.max_file_mb
+        ));
+    }
+    if file.mime.starts_with("image/") && !settings.images {
+        return Some("Image indexing is disabled".into());
+    }
+    if (file.mime.starts_with("audio/") || file.mime.starts_with("video/")) && !settings.audio_video
+    {
+        return Some("Audio and video indexing is disabled".into());
+    }
+    let ext = file
+        .path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let supported = file.mime.starts_with("text/")
+        || file.mime.starts_with("image/")
+        || file.mime.starts_with("audio/")
+        || file.mime.starts_with("video/")
+        || matches!(
+            ext.as_str(),
+            "pdf"
+                | "docx"
+                | "odt"
+                | "txt"
+                | "md"
+                | "rst"
+                | "csv"
+                | "log"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "rs"
+                | "py"
+                | "c"
+                | "h"
+                | "cpp"
+                | "js"
+                | "ts"
+                | "css"
+                | "xml"
+                | "sh"
+        );
+    if supported {
+        None
+    } else {
+        Some(format!(
+            "Content reader unavailable for {}; filename remains searchable",
+            file.mime
+        ))
+    }
+}
+
 /// Readers materialize one page/frame/window at a time. Temporary media disappears as soon as
 /// the file is done; no thumbnails or decoded recordings accumulate in the application data.
 pub fn read(
@@ -361,6 +420,7 @@ pub fn run_output(command: &mut Command, temp: &Path, limit: u64) -> Result<Vec<
     // SAFETY: only async-signal-safe libc calls execute between fork and exec.
     unsafe {
         command.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
             libc::setpgid(0, 0);
             let cap = libc::rlimit {
                 rlim_cur: 64 * 1024 * 1024,

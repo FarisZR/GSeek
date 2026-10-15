@@ -9,7 +9,7 @@ use std::path::PathBuf;
     about = "Find your files by what you remember, from GNOME Search"
 )]
 struct Args {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     query: Option<String>,
     #[command(subcommand)]
     command: Option<Action>,
@@ -53,10 +53,11 @@ fn run() -> Result<()> {
     match args.command {
         Some(Action::Service) => service::run(paths),
         Some(Action::Integrate { launcher }) => {
+            service::stop_running();
             gseek::integration::install(&paths, &launcher.unwrap_or(service::launcher()?))
         }
         Some(Action::Unintegrate) => {
-            let _ = service::command("quit", "");
+            service::stop_running();
             gseek::integration::uninstall(&paths)
         }
         Some(Action::Status) => {

@@ -1,7 +1,9 @@
 # Third-party components
 
-GSeek is GPL-3.0-or-later. Native GTK, libadwaita, GLib, TinySPARQL and the readers
-are installed as Homebrew dependencies, with their own licenses and notices.
+The Rust application is GPL-3.0-or-later. The separate inference helper is MIT
+(see inference/LICENSE). GSeek uses the host GNOME GTK, libadwaita, GLib and
+TinySPARQL libraries. Media readers are Homebrew dependencies, with their own
+licenses and notices.
 
 The managed inference bundle contains llama.cpp and ggml (MIT), including their
 vendored components. The bundle includes llama.cpp's LICENSE; its source at

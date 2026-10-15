@@ -32,6 +32,9 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         run("brew", "trust", "fariszr/gseek-ci")
         run("brew", "install", "--cask", "fariszr/gseek-ci/gseek")
         run("gseek", "--version")
+        gui = subprocess.run(["xvfb-run", "-a", "dbus-run-session", "--", "timeout", "3", "gseek"], text=True, capture_output=True)
+        assert gui.returncode == 124, gui.stderr
+        assert "CRITICAL" not in gui.stderr and "symbol lookup error" not in gui.stderr, gui.stderr
         data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
         config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         desktop = data / "applications/io.github.FarisZR.GSeek.desktop"
