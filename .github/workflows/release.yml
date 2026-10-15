@@ -34,6 +34,7 @@ jobs:
             ~/.cargo/git
             target
             build
+            .release-data/gseek/models
           key: release-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'inference/**', 'scripts/build-inference.sh') }}
           restore-keys: release-${{ matrix.arch }}-
       - name: Build native app and bundled CPU and Vulkan helpers
@@ -42,6 +43,25 @@ jobs:
           bash scripts/build-inference.sh cpu
           bash scripts/build-inference.sh vulkan
           bash scripts/package.sh '${{ matrix.arch }}'
+      - name: Validate packaged CPU inference on this architecture
+        env:
+          XDG_DATA_HOME: ${{ github.workspace }}/.release-data
+          XDG_CONFIG_HOME: ${{ github.workspace }}/.release-config
+          XDG_CACHE_HOME: ${{ github.workspace }}/.release-cache
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME/gseek"
+          printf '{"backend":"cpu"}\n' > "$XDG_CONFIG_HOME/gseek/settings.json"
+          dist/package/gseek/bin/gseek prepare-model
+          dist/package/gseek/bin/gseek embed 'task: search result | query: the clause about pets in the lease' > /tmp/gseek-release-vector.json
+          python3 - <<'PYTHON'
+          import json, math
+          actual=json.load(open('/tmp/gseek-release-vector.json'))
+          reference=json.load(open('data/reference-embedding.json'))
+          assert len(actual)==768 and all(math.isfinite(value) for value in actual)
+          score=sum(a*b for a,b in zip(actual,reference))
+          assert score > 0.999, f'Packaged inference drift: {score}'
+          print(f'Packaged inference reference cosine: {score:.6f}')
+          PYTHON
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-${{ matrix.arch }}
