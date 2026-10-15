@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Assemble immutable core packages and their matching managed GPU manifest."""
+"""Publish native app packages. The app consumes upstream inference distributions."""
 import argparse
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import shutil
-import tarfile
-import tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument("version")
@@ -33,30 +31,12 @@ def artifact(name):
 
 args.output.mkdir(parents=True, exist_ok=True)
 base = f"https://github.com/FarisZR/GSeek/releases/download/v{args.version}"
-manifest = {"version": 1, "assets": {}}
-for backend, architecture in [("cuda", "x86_64"), ("cuda", "aarch64"), ("rocm", "x86_64")]:
-    name = f"gseek-runtime-{backend}-{architecture}.tar.gz"
-    source = artifact(name)
-    target = args.output / name
-    shutil.copyfile(source, target)
-    manifest["assets"].setdefault(backend, {})[architecture] = {
-        "url": f"{base}/{name}", "sha256": digest(target), "bytes": target.stat().st_size,
-    }
-manifest_text = json.dumps(manifest, indent=2) + "\n"
-(args.output / "runtime-manifest.json").write_text(manifest_text)
 checksums = {}
 for architecture in ["aarch64", "x86_64"]:
     name = f"gseek-linux-{architecture}.tar.gz"
     source = artifact(name)
-    with tempfile.TemporaryDirectory(prefix="gseek-release-") as directory:
-        staging = Path(directory)
-        with tarfile.open(source) as archive:
-            archive.extractall(staging, filter="data")
-        (staging / "gseek/runtime-manifest.json").write_text(manifest_text)
-        target = args.output / name
-        with tarfile.open(target, "w:gz") as archive:
-            for item in sorted(staging.iterdir()):
-                archive.add(item, arcname=item.name)
+    target = args.output / name
+    shutil.copyfile(source, target)
     checksums[architecture] = digest(target)
 (args.output / "gseek.rb").write_text(cask.render(args.version, f"{base}/gseek-linux-#{{arch}}.tar.gz", checksums["aarch64"], checksums["x86_64"]))
 (args.output / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in sorted(args.output.iterdir()) if path.is_file() and path.name != "SHA256SUMS"))

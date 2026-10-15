@@ -44,7 +44,7 @@ provider registration in GNOME’s system data directory.
 
 1. Open **GSeek** from the app menu and select **Set Up Search**.
 2. Pick your folders. They must also be enabled in **GNOME Settings → Search → Search Locations**; GSeek uses LocalSearch’s existing discovery index.
-3. Choose **Download & Start**. The verified model downloads once, about **865 MB**.
+3. Choose **Download & Start**. The verified model downloads once, about **865 MB**, along with the selected upstream runtime.
 4. Search from Activities. Setup enables GSeek and disables the Files search provider after inference is ready.
 
 There is no inference server or SDK to install. Closing the window keeps indexing
@@ -77,25 +77,23 @@ are excluded. GSeek does not crawl your home directory independently of GNOME.
 
 | Backend | Availability |
 | --- | --- |
-| CPU | Included on x86-64 and ARM64; automatic fallback when GPU initialization fails |
-| Vulkan | Included; AMD and Intel GPUs with a working Vulkan driver; software Vulkan is tested in CI |
-| NVIDIA CUDA | Managed download on x86-64 and ARM64; compatible NVIDIA driver and compute capability 7.5 or newer |
-| AMD ROCm | Optional managed download on x86-64; compatibility depends on the GPU and driver |
+| CPU | Managed upstream download on x86-64 and ARM64; automatic fallback when GPU initialization fails |
+| Vulkan | Managed upstream download; AMD and Intel GPUs with a working Vulkan driver; software Vulkan is tested in CI |
+| NVIDIA CUDA | Managed upstream download on x86-64 and ARM64, including CUDA redistributable libraries; requires a compatible NVIDIA driver |
 
 Automatic selection tries CUDA on NVIDIA, Vulkan when a render device is
 available, then CPU. Explicit selections report failures instead of silently
-switching. Preferences expose the ROCm architecture override, including
-`10.3.0` for experimenting with RX 6700 XT compatibility. It does not guarantee
-support for hardware excluded by AMD’s current runtime.
+switching. AMD cards, including the RX 6700 XT, use Vulkan without ROCm overrides.
 
-CPU and real Vulkan inference, including a software Vulkan device, run in CI.
-CUDA and ROCm bundles are compiled and packaged in CI; physical GPU performance
-and compatibility still need testing on representative machines.
+GSeek downloads unmodified, version-pinned [official llama.cpp binaries](https://github.com/ggml-org/llama.cpp/releases/tag/b11669)
+and verifies their sizes and SHA-256 checksums. It builds no inference engine or
+GPU SDK. CPU and real software-Vulkan inference run in CI; physical GPU
+performance and driver compatibility still need testing on representative machines.
 
 ## Private by default
 
 Managed inference runs on your computer. Network access downloads checksummed
-model files and, if selected, a checksummed GPU runtime. There is no telemetry or
+model files and the selected checksummed upstream runtime. There is no telemetry or
 in-app update polling; Homebrew manages updates.
 
 Advanced users can configure an OpenAI-compatible **text embedding** endpoint.
@@ -131,6 +129,6 @@ Homebrew lifecycle on both architectures, native GTK views, actual overview
 search, multilingual retrieval, multimodal readers, database migrations, progress
 recovery, provider metadata and activation, and explicit inference failures.
 
-GSeek is GPL-3.0-or-later; the inference helper is MIT. Thanks to
+GSeek is GPL-3.0-or-later; the upstream inference runtime is MIT. Thanks to
 [DigUp](https://github.com/ARahim3/DigUp) for demonstrating a simple on-device
 EmbeddingGemma 2 experience. See [Third-party components](docs/THIRD_PARTY.md).

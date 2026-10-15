@@ -21,7 +21,6 @@ export GSEEK_TEST_ROOT="$root"
 export XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
 export GSEEK_BINARY="${GSEEK_BINARY:-$PWD/target/debug/gseek}"
-export GSEEK_RUNTIME_DIR="${GSEEK_RUNTIME_DIR:-$PWD/dist/runtime}"
 mkdir -p "$XDG_DATA_HOME/gseek" "$XDG_CONFIG_HOME/gseek" "$XDG_CACHE_HOME/gseek"
 # Shell intentionally ignores user data directories for search providers. Mirror
 # the cask's system artifact inside this disposable session's system data root.
@@ -31,6 +30,10 @@ export XDG_DATA_DIRS="$root/system/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/
 if [[ -n "${GSEEK_TEST_MODEL_CACHE:-}" ]]; then
   mkdir -p "$GSEEK_TEST_MODEL_CACHE"
   ln -s "$GSEEK_TEST_MODEL_CACHE" "$XDG_DATA_HOME/gseek/models"
+fi
+if [[ -n "${GSEEK_TEST_RUNTIME_CACHE:-}" ]]; then
+  mkdir -p "$GSEEK_TEST_RUNTIME_CACHE"
+  ln -s "$GSEEK_TEST_RUNTIME_CACHE" "$XDG_DATA_HOME/gseek/runtimes"
 fi
 setsid dbus-run-session -- "${GSEEK_TEST_PYTHON:-/usr/bin/python3}" tests/e2e.py &
 session_pid=$!

@@ -1,4 +1,4 @@
-"""Exercise the release boundary with small real archives, without a GPU SDK."""
+"""Exercise the release boundary with small real archives and immutable upstream metadata."""
 import hashlib
 import io
 import json
@@ -8,11 +8,12 @@ import tarfile
 import tempfile
 import unittest
 
-ASSEMBLER = Path(__file__).resolve().parents[1] / "scripts/assemble-release.py"
+ROOT = Path(__file__).resolve().parents[1]
+ASSEMBLER = ROOT / "scripts/assemble-release.py"
 
 
 class ReleaseAssembly(unittest.TestCase):
-    def test_packages_contain_the_exact_gpu_contract_and_verified_checksums(self):
+    def test_native_packages_are_published_unchanged_with_verified_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for architecture in ["x86_64", "aarch64"]:
@@ -21,26 +22,13 @@ class ReleaseAssembly(unittest.TestCase):
                     entry = tarfile.TarInfo("gseek/bin/gseek")
                     entry.size = len(data)
                     archive.addfile(entry, io.BytesIO(data))
-                    provider = tarfile.TarInfo("gseek-search-provider.ini")
-                    provider.size = 8
-                    archive.addfile(provider, io.BytesIO(b"provider"))
-            for backend, architecture in [("cuda", "x86_64"), ("cuda", "aarch64"), ("rocm", "x86_64")]:
-                (root / f"gseek-runtime-{backend}-{architecture}.tar.gz").write_bytes(f"{backend}-{architecture}".encode())
             output = root / "release"
             subprocess.run(["python3", str(ASSEMBLER), "0.1.0", str(root), str(output)], check=True, capture_output=True)
-            manifest = json.loads((output / "runtime-manifest.json").read_text())
-            self.assertEqual(manifest["version"], 1)
-            self.assertEqual(set(manifest["assets"]), {"cuda", "rocm"})
-            for backend, architectures in manifest["assets"].items():
-                for architecture, asset in architectures.items():
-                    data = (output / f"gseek-runtime-{backend}-{architecture}.tar.gz").read_bytes()
-                    self.assertEqual(asset["sha256"], hashlib.sha256(data).hexdigest())
-                    self.assertEqual(asset["bytes"], len(data))
-                    self.assertTrue(asset["url"].startswith("https://github.com/FarisZR/GSeek/releases/download/v0.1.0/"))
+            self.assertEqual({p.name for p in output.iterdir()}, {
+                "gseek-linux-x86_64.tar.gz", "gseek-linux-aarch64.tar.gz", "gseek.rb", "SHA256SUMS"})
             for architecture in ["x86_64", "aarch64"]:
-                with tarfile.open(output / f"gseek-linux-{architecture}.tar.gz") as archive:
-                    self.assertEqual(json.load(archive.extractfile("gseek/runtime-manifest.json")), manifest)
-                    self.assertEqual(archive.extractfile("gseek-search-provider.ini").read(), b"provider")
+                name = f"gseek-linux-{architecture}.tar.gz"
+                self.assertEqual((root / name).read_bytes(), (output / name).read_bytes())
             for line in (output / "SHA256SUMS").read_text().splitlines():
                 checksum, name = line.split("  ")
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), checksum)
@@ -54,6 +42,21 @@ class ReleaseAssembly(unittest.TestCase):
             result = subprocess.run(["python3", str(ASSEMBLER), "0.1.0", str(root), str(root / "release")], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Expected exactly one", result.stderr)
+
+    def test_upstream_runtime_contract_covers_all_backends_and_architectures(self):
+        manifest = json.loads((ROOT / "data/runtimes.json").read_text())
+        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(set(manifest["assets"]), {"cpu", "vulkan", "cuda"})
+        for backend, architectures in manifest["assets"].items():
+            self.assertEqual(set(architectures), {"x86_64", "aarch64"})
+            for assets in architectures.values():
+                self.assertEqual(len(assets), 2 if backend == "cuda" else 1)
+                for asset in assets:
+                    self.assertTrue(asset["url"].startswith(f'https://github.com/ggml-org/llama.cpp/releases/download/{manifest["release"]}/'))
+                    self.assertRegex(asset["sha256"], r"^[0-9a-f]{64}$")
+                    self.assertGreater(asset["bytes"], 0)
+                if backend == "cuda":
+                    self.assertIn("/cudart-", assets[1]["url"])
 
 
 if __name__ == "__main__":

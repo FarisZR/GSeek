@@ -9,7 +9,7 @@ use std::{
 };
 
 pub const REVISION: &str = "bfcd298762cc34d0357ece5ebdd31791a3a374d8";
-pub const PIPELINE: &str = "embeddinggemma2-bfcd298-q8-llama4d756bc-mean-v1";
+pub const PIPELINE: &str = "embeddinggemma2-bfcd298-q8-llama-b11669-mean-v1";
 pub struct ModelFile {
     pub name: &'static str,
     pub bytes: u64,
@@ -134,7 +134,7 @@ pub fn download_verified(
         request
     };
     let mut response = request.call().context(
-        "Cannot download EmbeddingGemma 2. Check your connection and choose Retry Setup.",
+        "Cannot download the required file. Check your connection and choose Retry Setup.",
     )?;
     if response.status() == 200 {
         offset = 0;
@@ -146,10 +146,10 @@ pub fn download_verified(
             .and_then(|h| h.to_str().ok())
             .is_some_and(|s| s.starts_with(&expected))
         {
-            bail!("Model server returned an invalid download range");
+            bail!("Download server returned an invalid download range");
         }
     } else {
-        bail!("Model server returned {}", response.status());
+        bail!("Download server returned {}", response.status());
     }
     let mut output = OpenOptions::new()
         .create(true)
@@ -168,7 +168,7 @@ pub fn download_verified(
         }
         offset += n as u64;
         if offset > bytes {
-            bail!("Model download exceeds its expected size");
+            bail!("Download exceeds its expected size");
         }
         output.write_all(&buffer[..n])?;
     }
@@ -176,7 +176,7 @@ pub fn download_verified(
     drop(output);
     if !verify_download(&partial, bytes, sha256)? {
         fs::remove_file(partial)?;
-        bail!("Model checksum did not match. Retry Setup to download a verified copy.");
+        bail!("Download checksum did not match. Retry Setup to download a verified copy.");
     }
     fs::rename(partial, dest)?;
     Ok(())

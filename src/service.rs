@@ -670,10 +670,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 let mut runtime = Runtime::new(paths, &settings, false);
                 runtime.validate()?;
                 let latest = paths.load()?;
-                if latest.backend != settings.backend
-                    || latest.external != settings.external
-                    || latest.rocm_override != settings.rocm_override
-                {
+                if latest.backend != settings.backend || latest.external != settings.external {
                     bail!(
                         "Inference settings changed; restarting setup with the new configuration"
                     );

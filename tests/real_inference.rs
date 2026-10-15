@@ -1,5 +1,5 @@
 //! These tests intentionally load the real, checksum-verified model. CI runs them for CPU
-//! and software Vulkan; release hardware jobs can run the identical contract for CUDA/ROCm.
+//! and software Vulkan; hardware jobs can run the identical contract for CUDA.
 use anyhow::Result;
 use gseek::{
     config::{Paths, Settings},

@@ -85,7 +85,6 @@ pub enum Backend {
     Cpu,
     Vulkan,
     Cuda,
-    Rocm,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,7 +96,6 @@ pub struct Settings {
     pub excluded_folders: Vec<PathBuf>,
     pub excluded_extensions: Vec<String>,
     pub backend: Backend,
-    pub rocm_override: Option<String>,
     pub external: Option<External>,
     pub paused: bool,
     pub images: bool,
@@ -171,7 +169,6 @@ impl Default for Settings {
             excluded_folders: vec![],
             excluded_extensions: vec![],
             backend: Backend::Auto,
-            rocm_override: None,
             external: None,
             paused: false,
             images: true,
@@ -214,11 +211,7 @@ impl Settings {
         if !(1..=16384).contains(&self.max_file_mb) {
             bail!("File limit must be between 1 and 16384 MB");
         }
-        if let Some(v) = &self.rocm_override
-            && !matches!(v.as_str(), "10.3.0" | "11.0.0" | "11.0.1" | "12.0.0")
-        {
-            bail!("Unsupported ROCm compatibility override");
-        }
+
         if let Some(external) = &self.external {
             external.validate()?;
         }
