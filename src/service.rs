@@ -25,7 +25,10 @@ const SEARCH_XML: &str = include_str!("../data/search-provider.xml");
 const CONTROL_XML: &str = include_str!("../data/service.xml");
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Status {
+    pub discovery_error: String,
+    pub discovering: bool,
     pub state: String,
     pub detail: String,
     pub current: String,
@@ -40,11 +43,51 @@ type Shared = Arc<Mutex<Status>>;
 #[derive(Debug)]
 enum Command {
     Setup,
-    Scan,
     Retry,
     Reindex(Option<PathBuf>),
     Wake,
     Quit,
+}
+
+#[derive(Debug)]
+enum DiscoveryCommand {
+    Scan,
+    Changed(Vec<i64>),
+    Quit,
+}
+
+#[derive(Debug)]
+enum IndexingInterruption {
+    Changed,
+    Yielded,
+}
+impl std::fmt::Display for IndexingInterruption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Changed => "File changed during indexing",
+            Self::Yielded => "A smaller file is ready to index",
+        })
+    }
+}
+impl std::error::Error for IndexingInterruption {}
+fn ensure_current(
+    store: &Store,
+    file: &crate::store::FileRecord,
+    settings: &Settings,
+    content: &str,
+) -> Result<()> {
+    match discovery::record_from_uri(&file.uri, settings)? {
+        Some(current) if current.stamp == file.stamp => Ok(()),
+        current => {
+            store.discard_incomplete(content)?;
+            if let Some(current) = current {
+                store.refresh(&current)?;
+            } else {
+                store.remove_file(&file.uri)?;
+            }
+            Err(IndexingInterruption::Changed.into())
+        }
+    }
 }
 
 fn status(shared: &Shared, state: &str, detail: impl Into<String>) {
@@ -65,6 +108,7 @@ pub fn run(paths: Paths) -> Result<()> {
         ..Default::default()
     }));
     let (tx, rx) = mpsc::channel();
+    let (discovery_tx, discovery_rx) = mpsc::channel();
     let worker_paths = paths.clone();
     let worker_state = shared.clone();
     let search = Rc::new(SearchQueue::new(&paths));
@@ -192,6 +236,7 @@ pub fn run(paths: Paths) -> Result<()> {
         let paths = startup_paths.clone();
         let state = startup_shared.clone();
         let tx = startup_tx.clone();
+        let control_discovery = discovery_tx.clone();
         let shutdown = main_loop.clone();
         let queue = search.clone();
         connection
@@ -229,6 +274,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                 state.lock().unwrap().ready = false;
                                 state.lock().unwrap().paused = settings.paused;
                                 tx.send(Command::Setup)?;
+                                control_discovery.send(DiscoveryCommand::Scan)?;
                                 Ok(None)
                             }
                             "Search" => {
@@ -268,7 +314,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                         state.lock().unwrap().paused = settings.paused;
                                         tx.send(Command::Wake)?;
                                     }
-                                    "scan" => tx.send(Command::Scan)?,
+                                    "scan" => control_discovery.send(DiscoveryCommand::Scan)?,
                                     "retry" => tx.send(Command::Retry)?,
                                     "setup" => tx.send(Command::Setup)?,
                                     "reindex" => {
@@ -294,6 +340,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                     }
                                     "quit" => {
                                         tx.send(Command::Quit)?;
+                                        control_discovery.send(DiscoveryCommand::Quit)?;
                                         shutdown.quit();
                                     }
                                     _ => bail!("Unknown command {command}"),
@@ -321,7 +368,7 @@ pub fn run(paths: Paths) -> Result<()> {
             "org.freedesktop.LocalSearch3",
             "org.freedesktop.Tracker3.Miner.Files",
         ] {
-            let tx = startup_tx.clone();
+            let tx = discovery_tx.clone();
             live_subscriptions
                 .borrow_mut()
                 .push(connection.subscribe_to_signal(
@@ -331,13 +378,20 @@ pub fn run(paths: Paths) -> Result<()> {
                     None,
                     None,
                     gio::DBusSignalFlags::NONE,
-                    move |_| {
-                        let _ = tx.send(Command::Scan);
+                    move |signal| {
+                        let command =
+                            if let Some(ids) = discovery::notification_ids(signal.parameters) {
+                                DiscoveryCommand::Changed(ids)
+                            } else {
+                                DiscoveryCommand::Scan
+                            };
+                        let _ = tx.send(command);
                     },
                 ));
         }
     }
     let pending_receiver = std::cell::RefCell::new(Some(rx));
+    let pending_discovery = std::cell::RefCell::new(Some(discovery_rx));
     let stop = main_loop.clone();
     let owner = gio::bus_own_name_on_connection(
         &connection,
@@ -349,6 +403,15 @@ pub fn run(paths: Paths) -> Result<()> {
             };
             let worker_paths = worker_paths.clone();
             let worker_state = worker_state.clone();
+            let discovery_rx = pending_discovery.borrow_mut().take().unwrap();
+            let discovery_paths = worker_paths.clone();
+            let discovery_state = worker_state.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = discovery_loop(&discovery_paths, &discovery_state, discovery_rx)
+                {
+                    discovery_state.lock().unwrap().discovery_error = format!("{error:#}");
+                }
+            });
             std::thread::spawn(move || {
                 // Lower the indexer's scheduling priority without slowing interactive searches.
                 unsafe {
@@ -368,6 +431,7 @@ pub fn run(paths: Paths) -> Result<()> {
     main_loop.run();
     gio::bus_unown_name(owner);
     let _ = tx.send(Command::Quit);
+    let _ = discovery_tx.send(DiscoveryCommand::Quit);
     Ok(())
 }
 
@@ -398,9 +462,19 @@ impl SearchQueue {
         let wshell = shell.clone();
         let wui = ui.clone();
         std::thread::spawn(move || {
-            let mut runtime = None;
+            let mut runtime: Option<Runtime> = None;
             let mut previous = String::new();
-            while let Ok(job) = receiver.recv() {
+            loop {
+                let job = match receiver.recv_timeout(Duration::from_secs(30)) {
+                    Ok(job) => job,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(runtime) = runtime.as_mut() {
+                            runtime.release_idle();
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 let generation = if job.shell { &wshell } else { &wui };
                 if generation.load(Ordering::Relaxed) != job.generation {
                     let _ = job.reply.send_blocking(Ok(vec![]));
@@ -461,13 +535,95 @@ impl SearchQueue {
     }
 }
 
+fn discovery_loop(
+    paths: &Paths,
+    shared: &Shared,
+    receiver: mpsc::Receiver<DiscoveryCommand>,
+) -> Result<()> {
+    let store = Store::open(&paths.database())?;
+    let mut full = true;
+    let mut changed = std::collections::BTreeSet::<i64>::new();
+    let mut last_full = Instant::now() - Duration::from_secs(301);
+    let mut next = Instant::now();
+    loop {
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                DiscoveryCommand::Quit => return Ok(()),
+                DiscoveryCommand::Scan => {
+                    full = true;
+                    next = Instant::now();
+                }
+                DiscoveryCommand::Changed(ids) => {
+                    changed.extend(ids.into_iter().filter(|id| *id > 0))
+                }
+            }
+        }
+        let settings = paths.load()?;
+        if settings.configured
+            && Instant::now() >= next
+            && (full || !changed.is_empty() || last_full.elapsed() >= Duration::from_secs(300))
+        {
+            shared.lock().unwrap().discovering = true;
+            let snapshot = full || last_full.elapsed() >= Duration::from_secs(300);
+            let result = (|| -> Result<()> {
+                if snapshot {
+                    store.prune_scope(&settings)?;
+                    let generation = store.start_scan()?;
+                    discovery::reconcile(&settings, |files| {
+                        for file in files {
+                            store.discover(&file, generation)?;
+                        }
+                        Ok(())
+                    })?;
+                    store.finish_scan(generation)?;
+                    full = false;
+                    changed.clear();
+                    last_full = Instant::now();
+                } else {
+                    let ids: Vec<_> = changed.iter().take(4096).copied().collect();
+                    let records = discovery::changed(&settings, &ids)?;
+                    store.apply_changes(&ids, &records)?;
+                    for id in ids {
+                        changed.remove(&id);
+                    }
+                }
+                Ok(())
+            })();
+            let mut status = shared.lock().unwrap();
+            status.discovering = false;
+            status.counts = store.counts()?;
+            match result {
+                Ok(()) => {
+                    status.discovery_error.clear();
+                    status.last_scan = crate::store::now();
+                    next = Instant::now() + Duration::from_millis(750);
+                }
+                Err(error) => {
+                    status.discovery_error = format!("{error:#}");
+                    store.log("LocalSearch", "failed", &status.discovery_error)?;
+                    next = Instant::now() + Duration::from_secs(30);
+                }
+            }
+        }
+        match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(DiscoveryCommand::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Ok(DiscoveryCommand::Scan) => {
+                full = true;
+                next = Instant::now();
+            }
+            Ok(DiscoveryCommand::Changed(ids)) => {
+                changed.extend(ids.into_iter().filter(|id| *id > 0))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => (),
+        }
+    }
+}
+
 fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>) -> Result<()> {
-    let mut store = Store::open(&paths.database())?;
+    let store = Store::open(&paths.database())?;
     let mut settings = paths.load()?;
     let mut runtime = None;
     let mut setup = settings.configured;
-    let mut scan = true;
-    let mut last_scan = Instant::now() - Duration::from_secs(301);
     let mut backoff = Instant::now();
     loop {
         while let Ok(command) = receiver.try_recv() {
@@ -475,10 +631,8 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 Command::Quit => return Ok(()),
                 Command::Setup => {
                     setup = true;
-                    scan = true;
                     backoff = Instant::now();
                 }
-                Command::Scan => scan = true,
                 Command::Retry => {
                     store.retry(None, true)?;
                     setup = true;
@@ -486,7 +640,6 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 }
                 Command::Reindex(p) => {
                     store.retry(p.as_deref(), false)?;
-                    scan = true;
                 }
                 Command::Wake => (),
             }
@@ -539,7 +692,6 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     shared.lock().unwrap().ready = true;
                     runtime = Some(r);
                     setup = false;
-                    scan = true;
                 }
                 Err(e) => {
                     status(shared, "error", format!("{e:#}"));
@@ -551,35 +703,6 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
         if !settings.configured && !setup {
             status(shared, "welcome", "Open GSeek to set up semantic search");
         } else if runtime.is_some() && !setup {
-            if (scan && last_scan.elapsed() >= Duration::from_secs(2))
-                || last_scan.elapsed() >= Duration::from_secs(300)
-            {
-                // Coalesce LocalSearch's burst of GraphUpdated signals into one reconciliation.
-                scan = false;
-                status(
-                    shared,
-                    "discovering",
-                    "Syncing file locations with GNOME LocalSearch",
-                );
-                store.prune_scope(&settings)?;
-                let generation = store.start_scan()?;
-                match discovery::reconcile(&settings, |files| {
-                    for file in files {
-                        store.discover(&file, generation)?;
-                    }
-                    Ok(())
-                }) {
-                    Ok(_) => {
-                        store.finish_scan(generation)?;
-                        shared.lock().unwrap().last_scan = crate::store::now();
-                    }
-                    Err(e) => {
-                        status(shared, "error", format!("{e:#}"));
-                        store.log("LocalSearch", "failed", &format!("{e:#}"))?;
-                    }
-                }
-                last_scan = Instant::now();
-            }
             shared.lock().unwrap().counts = store.counts()?;
             if !settings.paused
                 && let Some(file) = store.next_pending()?
@@ -598,34 +721,56 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     let runtime = runtime.as_mut().unwrap();
                     let content = format!("{}:{hash}", runtime.fingerprint());
                     if store.cached(&content, &runtime.fingerprint())? {
+                        ensure_current(&store, &file, &paths.load()?, &content)?;
                         store.complete(&file.uri, &content)?;
                         return Ok(());
                     }
-                    let mut chunks = vec![];
+                    let completed = store.content_progress(&content)?;
+                    if completed > 0 {
+                        store.log(
+                            &file.uri,
+                            "resumed",
+                            &format!("Resuming after {completed} completed parts"),
+                        )?;
+                    }
+                    let mut index = 0;
                     extract::read(&file, &settings, &paths.cache, |part| {
                         if shared.lock().unwrap().paused {
                             bail!("Indexing paused");
                         }
+                        let latest = paths.load()?;
+                        ensure_current(&store, &file, &latest, &content)?;
+                        if index < completed {
+                            index += 1;
+                            return Ok(());
+                        }
                         let vector = runtime.embed(&part.input)?;
-                        chunks.push(StoredChunk {
-                            text: part.text,
-                            vector: Some(vector),
-                            page: part.page,
-                            seconds: part.seconds,
-                        });
+                        ensure_current(&store, &file, &latest, &content)?;
+                        store.checkpoint(
+                            &content,
+                            &runtime.fingerprint(),
+                            index,
+                            &StoredChunk {
+                                text: part.text,
+                                vector: Some(vector),
+                                page: part.page,
+                                seconds: part.seconds,
+                            },
+                        )?;
+                        index += 1;
+                        if store
+                            .next_pending()?
+                            .is_some_and(|next| next.uri != file.uri)
+                        {
+                            return Err(IndexingInterruption::Yielded.into());
+                        }
                         Ok(())
                     })?;
-                    // Do not commit embeddings if the file changed under the reader.
-                    let current = discovery::record_from_uri(&file.uri, &settings)?
-                        .context("File was removed during indexing")?;
-                    if current.stamp != file.stamp {
-                        store.discover(&current, store.start_scan()?)?;
-                        return Ok(());
-                    }
-                    if chunks.is_empty() {
+                    ensure_current(&store, &file, &paths.load()?, &content)?;
+                    if index == 0 {
                         bail!("No searchable content was found");
                     }
-                    store.save_content(&content, &runtime.fingerprint(), &chunks)?;
+                    store.finish_content(&content)?;
                     store.complete(&file.uri, &content)?;
                     Ok(())
                 })();
@@ -633,6 +778,9 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 if let Err(e) = result
                     && !paused
                 {
+                    if e.downcast_ref::<IndexingInterruption>().is_some() {
+                        continue;
+                    }
                     if e.downcast_ref::<crate::inference::InferenceError>()
                         .is_some()
                     {
@@ -666,7 +814,6 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 setup = true;
                 backoff = Instant::now();
             }
-            Ok(Command::Scan) => scan = true,
             Ok(Command::Retry) => {
                 store.retry(None, true)?;
                 setup = true;
@@ -674,7 +821,6 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
             }
             Ok(Command::Reindex(p)) => {
                 store.retry(p.as_deref(), false)?;
-                scan = true;
             }
             Ok(Command::Wake) => (),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),

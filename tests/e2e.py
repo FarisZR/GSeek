@@ -153,7 +153,6 @@ class EndToEnd(unittest.TestCase):
         path = self.docs / "New Meeting.txt"
         path.write_text("We are planning a hiking expedition through the Black Forest next spring.")
         self.add(path)
-        self.command("scan")
         wait_for(lambda: self.status()["counts"]["pending"] >= 1)
         self.assertTrue(json.loads((ROOT / "config/gseek/settings.json").read_text())["paused"])
         self.command("resume")
@@ -169,14 +168,12 @@ class EndToEnd(unittest.TestCase):
         old.rename(new)
         self.add(new)
         self.remove(old)
-        self.command("scan")
         wait_for(lambda: any(h["name"] == new.name for h in self.search("roasted tomato soup")))
         wait_for(lambda: self.status()["counts"]["pending"] == 0)
         with sqlite3.connect(database) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM chunks").fetchone()[0], before)
         new.unlink()
         self.remove(new)
-        self.command("scan")
         wait_for(lambda: all(h["name"] != new.name for h in self.search("roasted tomato soup")))
 
     def test_05_concurrent_queries_are_bounded_and_responsive(self):

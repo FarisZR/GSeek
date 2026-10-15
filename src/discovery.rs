@@ -90,6 +90,13 @@ pub fn sparql_string(s: &str) -> String {
 }
 
 pub fn discovery_query(settings: &Settings, after: &str) -> String {
+    query_for(
+        settings,
+        &format!("STR(?url) > {}", sparql_string(after)),
+        true,
+    )
+}
+fn query_for(settings: &Settings, filter: &str, paged: bool) -> String {
     let scope = settings
         .folders
         .iter()
@@ -104,41 +111,38 @@ pub fn discovery_query(settings: &Settings, after: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" || ");
-    format!("PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
-        PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
-        PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
-        SELECT DISTINCT ?url WHERE {{ GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
-        FILTER (STR(?url) > {}) FILTER ({}) }} ORDER BY ?url LIMIT 256",sparql_string(after),if scope.is_empty(){"false"}else{&scope})
+    let limit = if paged { "LIMIT 256" } else { "" };
+    format!(
+        "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
+      PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
+      PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
+      SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
+      GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
+      FILTER ({filter}) FILTER ({}) }} ORDER BY ?url {limit}",
+        if scope.is_empty() { "false" } else { &scope }
+    )
 }
 
-pub fn reconcile(
-    settings: &Settings,
-    mut page: impl FnMut(Vec<FileRecord>) -> Result<()>,
-) -> Result<usize> {
-    if settings.folders.is_empty() {
-        return Ok(0);
-    }
-    // An unavailable mount must never be mistaken for deletion of all the files in it.
+fn check_roots(settings: &Settings) -> Result<()> {
     for root in &settings.folders {
         fs::read_dir(root)
             .with_context(|| format!("Search location is unavailable: {}", root.display()))?;
     }
-    let api = Api::load()?;
-    let mut connection = None;
+    Ok(())
+}
+fn connect(api: &Api) -> Result<glib::Object> {
     for service in [
         "org.freedesktop.LocalSearch3",
         "org.freedesktop.Tracker3.Miner.Files",
     ] {
         let name = CString::new(service)?;
         let mut error = ptr::null_mut();
-        // SAFETY: inputs are valid C strings; null optional parameters select GLib's session bus.
+        // SAFETY: valid C string; null optional arguments select the session bus/default endpoint.
         let object =
             unsafe { (api.connect)(name.as_ptr(), ptr::null(), ptr::null_mut(), &mut error) };
         let result = checked_error(error);
         if !object.is_null() {
-            // SAFETY: bus_new returns a GObject with a full reference.
-            connection = Some(unsafe { glib::Object::from_glib_full(object.cast()) });
-            break;
+            return Ok(unsafe { glib::Object::from_glib_full(object.cast()) });
         }
         if service.ends_with("Miner.Files") {
             result.context(
@@ -146,66 +150,98 @@ pub fn reconcile(
             )?;
         }
     }
-    let connection = connection.context("GNOME LocalSearch did not provide a connection")?;
-    let conn_ptr = connection.as_ptr().cast();
+    bail!("GNOME LocalSearch did not provide a connection")
+}
+fn read_query(
+    api: &Api,
+    connection: &glib::Object,
+    query: &str,
+    settings: &Settings,
+) -> Result<(Vec<FileRecord>, String, usize)> {
+    let query = CString::new(query)?;
+    let mut error = ptr::null_mut();
+    let cancel = gio::Cancellable::new();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let timeout_cancel = cancel.clone();
+    std::thread::spawn(move || {
+        if done_rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .is_err()
+        {
+            timeout_cancel.cancel();
+        }
+    });
+    // SAFETY: the connection and cancellable remain alive for the query and cursor iteration.
+    let cursor = unsafe {
+        (api.query)(
+            connection.as_ptr().cast(),
+            query.as_ptr(),
+            cancel.to_glib_none().0,
+            &mut error,
+        )
+    };
+    checked_error(error)?;
+    if cursor.is_null() {
+        bail!("LocalSearch returned no cursor");
+    }
+    let cursor_object = unsafe { glib::Object::from_glib_full(cursor.cast()) };
+    let mut records = vec![];
+    let mut after = String::new();
+    let mut read = 0;
+    loop {
+        error = ptr::null_mut();
+        let more = unsafe { (api.next)(cursor, cancel.to_glib_none().0, &mut error) };
+        checked_error(error)?;
+        if more == 0 {
+            break;
+        }
+        // SAFETY: the cursor is on a valid row. Copy borrowed values before advancing it.
+        let raw = unsafe { (api.string_at)(cursor, 0, ptr::null_mut()) };
+        if raw.is_null() {
+            bail!("LocalSearch returned a row without a file URI");
+        }
+        let uri = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        after = uri.clone();
+        read += 1;
+        if let Some(mut record) = record_from_uri(&uri, settings)? {
+            let id = unsafe { (api.string_at)(cursor, 1, ptr::null_mut()) };
+            if id.is_null() {
+                bail!("LocalSearch returned no resource ID");
+            }
+            record.source_id = unsafe { CStr::from_ptr(id) }.to_str()?.parse()?;
+            records.push(record);
+        }
+    }
+    unsafe { (api.close)(cursor) };
+    drop(cursor_object);
+    let _ = done_tx.send(());
+    Ok((records, after, read))
+}
+
+/// Initial/periodic recovery snapshots are paged. Normal updates query only the changed
+/// resource IDs supplied by LocalSearch's GraphUpdated signal, including renames/deletions.
+pub fn reconcile(
+    settings: &Settings,
+    mut page: impl FnMut(Vec<FileRecord>) -> Result<()>,
+) -> Result<usize> {
+    if settings.folders.is_empty() {
+        return Ok(0);
+    }
+    check_roots(settings)?;
+    let api = Api::load()?;
+    let connection = connect(api)?;
     let mut after = String::new();
     let mut count = 0;
     loop {
-        let query = CString::new(discovery_query(settings, &after))?;
-        let mut error = ptr::null_mut();
-        let cancel = gio::Cancellable::new();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let timeout_cancel = cancel.clone();
-        std::thread::spawn(move || {
-            if done_rx
-                .recv_timeout(std::time::Duration::from_secs(15))
-                .is_err()
-            {
-                timeout_cancel.cancel();
-            }
-        });
-        // SAFETY: the connection and cancellable remain alive during the synchronous query.
-        let cursor = unsafe {
-            (api.query)(
-                conn_ptr,
-                query.as_ptr(),
-                cancel.to_glib_none().0,
-                &mut error,
-            )
-        };
-        checked_error(error)?;
-        if cursor.is_null() {
-            bail!("LocalSearch returned no cursor");
-        }
-        // SAFETY: the cursor has transfer-full GObject ownership and outlives all reads below.
-        let cursor_object = unsafe { glib::Object::from_glib_full(cursor.cast()) };
-        let mut records = vec![];
-        let mut read = 0;
-        loop {
-            error = ptr::null_mut();
-            // SAFETY: cursor is live; next moves to a valid row before string_at is used.
-            let more = unsafe { (api.next)(cursor, cancel.to_glib_none().0, &mut error) };
-            checked_error(error)?;
-            if more == 0 {
-                break;
-            }
-            let raw = unsafe { (api.string_at)(cursor, 0, ptr::null_mut()) };
-            if raw.is_null() {
-                bail!("LocalSearch returned a row without a file URI");
-            }
-            // SAFETY: the borrowed UTF-8 string is copied before the cursor advances.
-            let uri = unsafe { CStr::from_ptr(raw) }
-                .to_string_lossy()
-                .into_owned();
-            after = uri.clone();
-            read += 1;
-            if let Some(record) = record_from_uri(&uri, settings)? {
-                records.push(record);
-            }
-        }
-        unsafe { (api.close)(cursor) };
-        drop(cursor_object);
-        let _ = done_tx.send(());
+        let (records, last, read) = read_query(
+            api,
+            &connection,
+            &discovery_query(settings, &after),
+            settings,
+        )?;
+        after = last;
         count += records.len();
         page(records)?;
         if read < 256 {
@@ -213,6 +249,26 @@ pub fn reconcile(
         }
     }
     Ok(count)
+}
+pub fn changed(settings: &Settings, ids: &[i64]) -> Result<Vec<FileRecord>> {
+    check_roots(settings)?;
+    let api = Api::load()?;
+    let connection = connect(api)?;
+    let mut records = vec![];
+    for chunk in ids.chunks(256) {
+        let ids = chunk
+            .iter()
+            .filter(|id| **id > 0)
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        if ids.is_empty() {
+            continue;
+        }
+        let query = query_for(settings, &format!("tracker:id(?f) IN ({ids})"), false);
+        records.extend(read_query(api, &connection, &query, settings)?.0);
+    }
+    Ok(records)
 }
 
 pub fn record_from_uri(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {
@@ -251,6 +307,7 @@ pub fn record_from_uri(uri: &str, settings: &Settings) -> Result<Option<FileReco
             .to_string_lossy()
             .into_owned(),
         uri: uri.into(),
+        source_id: 0,
         stamp: format!(
             "{}:{}:{}:{}:{}",
             meta.dev(),
@@ -270,9 +327,32 @@ pub fn root_is_visible(root: &Path) -> bool {
     fs::read_dir(root).is_ok()
 }
 
+pub fn notification_ids(parameters: &glib::Variant) -> Option<Vec<i64>> {
+    if parameters.type_().as_str() != "(sa{ii})" {
+        return None;
+    }
+    // TinySPARQL sends (event type, resource ID), with repeated event types. A
+    // HashMap would silently drop all but one creation/update in each batch.
+    Some(
+        parameters
+            .child_value(1)
+            .iter()
+            .filter_map(|entry| entry.child_value(1).get::<i32>().map(i64::from))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notifications_preserve_every_resource_in_a_batch() -> Result<()> {
+        let message =
+            glib::Variant::parse(None, "('tracker:FileSystem', {0: 12, 0: 34, 1: 56, 2: 78})")?;
+        assert_eq!(notification_ids(&message), Some(vec![12, 34, 56, 78]));
+        assert_eq!(notification_ids(&glib::Variant::from("unexpected")), None);
+        Ok(())
+    }
     #[test]
     fn sparql_never_interpolates_unescaped_user_paths() {
         assert_eq!(sparql_string("a\"\\\n"), "\"a\\\"\\\\\\n\"");

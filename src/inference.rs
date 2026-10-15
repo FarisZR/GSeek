@@ -100,7 +100,7 @@ impl Runtime {
                 );
             };
             // Disable redirects: a server must not forward document content to another machine.
-            let client = model::agent(Duration::from_secs(15), 0);
+            let client = model::agent(Duration::from_secs(15), 0, crate::config::is_loopback(&url));
             let address = format!("{}/embeddings", url.as_str().trim_end_matches('/'));
             let response: Value = client
                 .post(&address)
