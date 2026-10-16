@@ -20,7 +20,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 #[ignore = "Uses the system unzip reader and Python's ZIP fixture generator"]
 fn office_documents_use_system_unzip() -> Result<()> {
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::Builder::new().prefix("gseek-office-").tempdir()?;
     let settings = Settings {
         folders: vec![dir.path().into()],
         ..Default::default()
