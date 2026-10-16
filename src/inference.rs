@@ -1,4 +1,5 @@
 use crate::{
+    cancellation::Cancellation,
     config::{Backend, Paths, Settings},
     extract::Input,
     model,
@@ -12,6 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -23,7 +25,11 @@ pub struct Runtime {
     cache: VecDeque<(String, Vec<f32>)>,
     pub backend: String,
     last_used: Instant,
+    cancellation: Cancellation,
+    progress: Progress,
 }
+
+type Progress = Arc<dyn Fn(&str, u64, u64) + Send + Sync>;
 
 #[derive(Debug)]
 pub struct InferenceError(pub String);
@@ -44,7 +50,23 @@ impl Runtime {
             cache: VecDeque::new(),
             backend: String::new(),
             last_used: Instant::now(),
+            cancellation: Cancellation::default(),
+            progress: Arc::new(|_, _, _| {}),
         }
+    }
+    pub(crate) fn with_cancellation(mut self, cancellation: Cancellation) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+    pub(crate) fn with_progress(
+        mut self,
+        progress: impl Fn(&str, u64, u64) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Arc::new(progress);
+        self
+    }
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancellation.check().is_err()
     }
     pub fn fingerprint(&self) -> String {
         if let Some(e) = &self.settings.external {
@@ -88,10 +110,12 @@ impl Runtime {
         }
     }
     pub fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
-        self.embed_inner(input)
-            .map_err(|e| InferenceError(format!("{e:#}")).into())
+        let result = self.embed_inner(input);
+        self.cancellation.check()?;
+        result.map_err(|e| InferenceError(format!("{e:#}")).into())
     }
     fn embed_inner(&mut self, input: &Input) -> Result<Vec<f32>> {
+        self.cancellation.check()?;
         self.last_used = Instant::now();
         if let Some(e) = &self.settings.external {
             let url = e.validate()?;
@@ -132,17 +156,26 @@ impl Runtime {
             let mut failures = vec![];
             for backend in candidates(self.settings.backend) {
                 let attempt: Result<_> = (|| {
-                    let mut worker = Worker::start(&self.paths, self.query_only, backend)?;
+                    let mut worker = Worker::start(
+                        &self.paths,
+                        self.query_only,
+                        backend,
+                        &self.cancellation,
+                        &self.progress,
+                    )?;
                     let vector = worker.embed(input)?;
                     Ok((worker, vector))
                 })();
                 match attempt {
                     Ok((worker, vector)) => {
                         self.worker = Some(worker);
-                        self.backend = format!("{backend:?}");
+                        self.backend = backend.label().into();
                         return Ok(vector);
                     }
-                    Err(e) => failures.push(format!("{backend:?}: {e:#}")),
+                    Err(e) => {
+                        self.cancellation.check()?;
+                        failures.push(format!("{}: {e:#}", backend.label()));
+                    }
                 }
             }
             bail!("Cannot start EmbeddingGemma 2. {}", failures.join("\n"));
@@ -178,14 +211,30 @@ pub fn candidates(selected: Backend) -> Vec<Backend> {
 
 // The worker is an unmodified upstream server, reached only through a private socket.
 struct Worker {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     client: ureq::Agent,
     media_marker: String,
     _socket_dir: tempfile::TempDir,
 }
 impl Worker {
-    fn start(paths: &Paths, query_only: bool, backend: Backend) -> Result<Self> {
-        let dir = crate::managed_runtime::directory(paths, backend)?;
+    fn start(
+        paths: &Paths,
+        query_only: bool,
+        backend: Backend,
+        cancellation: &Cancellation,
+        progress: &Progress,
+    ) -> Result<Self> {
+        cancellation.check()?;
+        let dir = crate::managed_runtime::directory_with_progress(
+            paths,
+            backend,
+            |detail, done, total| {
+                cancellation.check()?;
+                progress(detail, done, total);
+                Ok(())
+            },
+        )?;
+        progress(&format!("Starting {}", backend.label()), 0, 0);
         let models = paths.data.join("models");
         for file in if query_only {
             &model::FILES[..1]
@@ -303,17 +352,22 @@ impl Worker {
             .unwrap_or(60)
             .clamp(1, 600);
         let mut worker = Self {
-            child: cmd
-                .spawn()
-                .context("Cannot launch the upstream embedding runtime")?,
+            child: Arc::new(Mutex::new(
+                cmd.spawn()
+                    .context("Cannot launch the upstream embedding runtime")?,
+            )),
             client: crate::local_http::agent(socket.clone(), Duration::from_secs(timeout)),
             media_marker: String::new(),
             _socket_dir: socket_dir,
         };
+        cancellation.track(&worker.child)?;
         let readiness = crate::local_http::agent(socket, Duration::from_secs(1));
         let started = Instant::now();
         loop {
-            if worker.child.try_wait()?.is_some() || started.elapsed() > Duration::from_secs(90) {
+            cancellation.check()?;
+            if worker.child.lock().unwrap().try_wait()?.is_some()
+                || started.elapsed() > Duration::from_secs(90)
+            {
                 let log = fs::read_to_string(log_path).unwrap_or_default();
                 let tail = log
                     .lines()
@@ -324,7 +378,10 @@ impl Worker {
                     .rev()
                     .collect::<Vec<_>>()
                     .join("\n");
-                bail!("Embedding runtime did not become ready. {tail}");
+                bail!(
+                    "{} could not start. Your selected backend has been kept. Check the GPU driver and available memory. Runtime details: {tail}",
+                    backend.label()
+                );
             }
             if readiness.get("http://127.0.0.1/health").call().is_ok() {
                 break;
@@ -384,8 +441,8 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.lock().unwrap().kill();
+        let _ = self.child.lock().unwrap().wait();
     }
 }
 
@@ -423,8 +480,8 @@ mod tests {
         };
         let expected = runtime.embed(&input)?;
         let worker = runtime.worker.as_mut().unwrap();
-        worker.child.kill()?;
-        worker.child.wait()?;
+        worker.child.lock().unwrap().kill()?;
+        worker.child.lock().unwrap().wait()?;
         assert!(runtime.embed(&input).is_err());
         assert!(runtime.worker.is_none());
         let actual = runtime.embed(&input)?;
@@ -435,8 +492,8 @@ mod tests {
             // deliberately ships only its own backend, so it checks explicit errors above.
             runtime.settings.backend = Backend::Auto;
             let worker = runtime.worker.as_mut().unwrap();
-            worker.child.kill()?;
-            worker.child.wait()?;
+            worker.child.lock().unwrap().kill()?;
+            worker.child.lock().unwrap().wait()?;
             let recovered = runtime.embed(&input)?;
             validate_vector(&recovered)?;
             assert!(

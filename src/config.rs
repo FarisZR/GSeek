@@ -87,6 +87,17 @@ pub enum Backend {
     Cuda,
 }
 
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automatic",
+            Self::Cpu => "CPU",
+            Self::Vulkan => "Vulkan",
+            Self::Cuda => "NVIDIA CUDA",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -180,6 +191,22 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Merge an individual preference against the latest saved settings.
+    /// This prevents one open page from overwriting unrelated changes.
+    pub fn patched(&self, patch: serde_json::Value) -> Result<Self> {
+        let patch = patch.as_object().context("Preferences must be an object")?;
+        let mut current = serde_json::to_value(self)?;
+        let fields = current.as_object_mut().unwrap();
+        for (name, value) in patch {
+            if !fields.contains_key(name) || matches!(name.as_str(), "version" | "configured") {
+                bail!("Unknown or protected preference: {name}");
+            }
+            fields.insert(name.clone(), value.clone());
+        }
+        let settings: Self = serde_json::from_value(current)?;
+        settings.validate()?;
+        Ok(settings)
+    }
     pub fn location_label(&self, path: &Path) -> String {
         self.folders
             .iter()
@@ -274,6 +301,35 @@ fn sensitive(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preference_patches_preserve_other_changes_and_validate_before_saving() -> Result<()> {
+        let initial = Settings::default();
+        let cuda = initial.patched(serde_json::json!({"backend":"cuda"}))?;
+        let folders =
+            cuda.patched(serde_json::json!({"excluded_folders":["/home/test/private"]}))?;
+        assert_eq!(folders.backend, Backend::Cuda);
+        assert!(!folders.configured);
+        assert_eq!(
+            folders.excluded_folders,
+            vec![PathBuf::from("/home/test/private")]
+        );
+        assert!(
+            initial
+                .patched(serde_json::json!({"backend":"unknown"}))
+                .is_err()
+        );
+        assert!(
+            initial
+                .patched(serde_json::json!({"configured":true}))
+                .is_err()
+        );
+        assert!(
+            initial
+                .patched(serde_json::json!({"excluded_folders":["/"]}))
+                .is_err()
+        );
+        Ok(())
+    }
     #[test]
     fn scope_is_component_aware_and_excludes_private_generated_data() {
         let mut s = Settings {

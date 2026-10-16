@@ -258,6 +258,45 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(any(hit["name"] == note.name for hit in self.search("Excluded Note.md")))
         self.assertEqual(self.search("INV-2026-0042")[0]["name"], "Rechnung.txt")
 
+    def test_06a_folder_exclusion_deletes_index_and_queue_immediately(self):
+        excluded = self.docs / "Private Archive"
+        excluded.mkdir()
+        indexed = excluded / "Indexed.txt"
+        queued = excluded / "Queued.txt"
+        indexed.write_text("A private archive of handmade wooden chess sets.")
+        database = ROOT / "data/gseek/index.sqlite3"
+        def row(path):
+            with closing(sqlite3.connect(database)) as db:
+                return db.execute("SELECT state,content FROM files WHERE uri=?", (path.as_uri(),)).fetchone()
+        previous = json.loads(self.invoke("Settings")[0])["excluded_folders"]
+        try:
+            self.add(indexed)
+            wait_for(lambda: row(indexed) and row(indexed)[0] == "indexed")
+            content = row(indexed)[1]
+            self.command("pause")
+            queued.write_text("A pending document that must never be indexed after exclusion.")
+            self.add(queued)
+            wait_for(lambda: row(queued) is not None)
+            self.invoke("UpdateSettings", GLib.Variant("(s)", (json.dumps({"excluded_folders": previous + [str(excluded)]}),)))
+            self.assertIsNone(row(indexed), "Exclusion must be committed before the preference call returns")
+            self.assertIsNone(row(queued))
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM chunks WHERE content=?", (content,)).fetchone()[0], 0)
+            self.command("scan")
+            self.command("resume")
+            wait_for(lambda: self.status()["ready"])
+            self.assertIsNone(row(indexed))
+            self.assertIsNone(row(queued))
+            self.assertFalse(any(hit["uri"] == indexed.as_uri() for hit in self.search("handmade wooden chess sets")))
+        finally:
+            for path in [indexed, queued]:
+                path.unlink(missing_ok=True)
+                self.remove(path)
+            excluded.rmdir()
+            self.invoke("UpdateSettings", GLib.Variant("(s)", (json.dumps({"excluded_folders": previous}),)))
+            self.command("resume")
+            wait_for(lambda: self.status()["ready"])
+
     def test_06b_enabling_images_reconsiders_previously_skipped_files(self):
         settings = json.loads(self.invoke("Settings")[0])
         settings["images"] = False
@@ -285,6 +324,67 @@ class EndToEnd(unittest.TestCase):
             picture.unlink(missing_ok=True)
             self.remove(picture)
             wait_for(lambda: state() is None)
+
+    def test_06c_stalled_cuda_is_cancelled_and_failed_cuda_keeps_the_saved_choice(self):
+        # Fault injection tests process cancellation, not CUDA inference. Healthy
+        # embeddings still come from the real upstream CPU/Vulkan distribution.
+        runtime_root = ROOT / "controlled-runtimes"
+        runtime_root.mkdir()
+        cache = ROOT / "data/gseek/runtimes"
+        for backend in ["cpu", "vulkan"]:
+            directories = list(cache.glob(f"*-{backend}-*"))
+            if directories:
+                (runtime_root / backend).symlink_to(directories[0].resolve(), target_is_directory=True)
+        cuda = runtime_root / "cuda"
+        cuda.mkdir()
+        pidfile = ROOT / "cuda.pid"
+        fail = ROOT / "cuda-fail"
+        engine = cuda / "llama-server"
+        engine.write_text(f"#!{sys.executable}\nimport os,sys,time\nfrom pathlib import Path\nPath({str(pidfile)!r}).write_text(str(os.getpid()))\nif Path({str(fail)!r}).exists():\n sys.stderr.write('CUDA error: out of memory\\n')\n sys.exit(1)\nwhile True: time.sleep(1)\n")
+        engine.chmod(0o700)
+        original = json.loads(self.invoke("Settings")[0])["backend"]
+        restore = "auto" if original == "cpu" else original
+        def activation(value):
+            self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "UpdateActivationEnvironment", GLib.Variant("(a{ss})", ({"GSEEK_RUNTIME_DIR": value},)), None, Gio.DBusCallFlags.NONE, 1000, None)
+        def stopped():
+            return not self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", (BUS,)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+        def update(backend):
+            self.invoke("UpdateSettings", GLib.Variant("(s)", (json.dumps({"backend": backend}),)))
+        probe = self.docs / "Backend Recovery.txt"
+        try:
+            activation(str(runtime_root))
+            self.command("quit")
+            wait_for(stopped)
+            wait_for(lambda: self.status()["ready"], timeout=300)
+            update("cuda")
+            wait_for(pidfile.exists, timeout=5)
+            pid = int(pidfile.read_text())
+            self.assertEqual(json.loads(self.invoke("Settings")[0])["backend"], "cuda")
+            self.assertEqual(self.status()["requested_backend"], "cuda")
+            update(restore)
+            wait_for(lambda: not Path(f"/proc/{pid}").exists(), timeout=5)
+            wait_for(lambda: self.status()["ready"], timeout=300)
+            self.assertEqual(self.status()["backend"], "CPU" if restore == "auto" else "Vulkan")
+            probe.write_text("A recovered indexing job records the silver telescope lens.")
+            self.add(probe)
+            wait_for(lambda: any(hit["uri"] == probe.as_uri() for hit in self.search("silver telescope lens")))
+            pidfile.unlink()
+            fail.touch()
+            update("cuda")
+            wait_for(lambda: self.status()["state"] == "error", timeout=10)
+            self.assertIn("out of memory", self.status()["detail"])
+            self.assertEqual(json.loads(self.invoke("Settings")[0])["backend"], "cuda")
+            update(restore)
+            wait_for(lambda: self.status()["ready"], timeout=300)
+        finally:
+            probe.unlink(missing_ok=True)
+            self.remove(probe)
+            update(original)
+            wait_for(lambda: self.status()["ready"], timeout=300)
+            activation(os.environ.get("GSEEK_RUNTIME_DIR", ""))
+            self.command("quit")
+            wait_for(stopped)
+            wait_for(lambda: self.status()["ready"], timeout=300)
 
     def test_07_install_is_idempotent_and_uninstall_preserves_user_edits(self):
         subprocess.run([BINARY, "integrate"], check=True)

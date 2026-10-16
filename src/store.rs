@@ -144,6 +144,27 @@ impl Store {
     }
 
     pub fn discover(&self, file: &FileRecord, generation: i64) -> Result<()> {
+        // Check the committed policy under the same write transaction as insertion.
+        // A scan that started before an exclusion cannot put its files back.
+        let tx = if self.conn.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?)
+        } else {
+            None
+        };
+        let scope: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM metadata WHERE key='scope'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(scope) = scope
+            && !serde_json::from_str::<Settings>(&scope)?.allows(&file.path)
+        {
+            return Ok(());
+        }
         self.conn.execute("INSERT INTO files(uri,path,name,mime,folded,stamp,size,folder,seen,state,source_id)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
             ON CONFLICT(uri) DO UPDATE SET path=excluded.path,name=excluded.name,mime=excluded.mime,folded=excluded.folded,
@@ -151,6 +172,9 @@ impl Store {
             state=CASE WHEN files.stamp!=excluded.stamp THEN excluded.state ELSE files.state END,stamp=excluded.stamp",
             params![file.uri, file.path.to_string_lossy(), file.name, file.mime, folded(&file.path.to_string_lossy()),
                 file.stamp, i64::try_from(file.size).unwrap_or(i64::MAX), file.folder, generation, if file.folder { "indexed" } else { "pending" },file.source_id])?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -203,6 +227,11 @@ impl Store {
     }
 
     pub fn prune_scope(&self, settings: &Settings) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        self.conn.execute("INSERT INTO metadata VALUES('scope',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(settings)?])?;
         let mut stmt = self.conn.prepare("SELECT uri,path FROM files")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
@@ -211,6 +240,26 @@ impl Store {
                 self.conn.execute("DELETE FROM files WHERE uri=?1", [uri])?;
             }
         }
+        drop(stmt);
+        // Exclusions are deletion requests, including vectors and resumable parts.
+        // Content still referenced by an included duplicate is retained.
+        self.conn.execute("DELETE FROM contents WHERE id NOT IN (SELECT content FROM files WHERE content IS NOT NULL)", [])?;
+        let mut stmt = self.conn.prepare("SELECT DISTINCT path FROM activity")?;
+        let paths = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for path in paths {
+            let file = url::Url::parse(&path)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .unwrap_or_else(|| PathBuf::from(&path));
+            if file.is_absolute() && !settings.allows(&file) {
+                self.conn
+                    .execute("DELETE FROM activity WHERE path=?1", [path])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -313,6 +362,38 @@ impl Store {
         self.conn.execute("INSERT OR IGNORE INTO chunks(content,text,vector,page,seconds,part) VALUES(?1,?2,?3,?4,?5,?6)",params![content,chunk.text,bytes,chunk.page,chunk.seconds,part as i64])?;
         Ok(())
     }
+    pub fn checkpoint_for(
+        &self,
+        file: &FileRecord,
+        content: &str,
+        pipeline: &str,
+        part: usize,
+        chunk: &StoredChunk,
+    ) -> Result<bool> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let present = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM files WHERE uri=?1 AND stamp=?2",
+                params![file.uri, file.stamp],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !present {
+            return Ok(false);
+        }
+        self.checkpoint(content, pipeline, part, chunk)?;
+        self.conn.execute(
+            "UPDATE files SET content=?2 WHERE uri=?1",
+            params![file.uri, content],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
     pub fn finish_content(&self, content: &str) -> Result<()> {
         self.conn
             .execute("UPDATE contents SET complete=1 WHERE id=?1", [content])?;
@@ -325,19 +406,25 @@ impl Store {
     }
 
     pub fn complete(&self, uri: &str, content: &str) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE files SET content=?2,state='indexed',error='' WHERE uri=?1",
             params![uri, content],
         )?;
-        self.log(uri, "indexed", "Ready to search")
+        if changed > 0 {
+            self.log(uri, "indexed", "Ready to search")?;
+        }
+        Ok(())
     }
 
     pub fn mark(&self, uri: &str, state: &str, detail: &str) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE files SET state=?2,error=?3 WHERE uri=?1",
             params![uri, state, detail],
         )?;
-        self.log(uri, state, detail)
+        if changed > 0 {
+            self.log(uri, state, detail)?;
+        }
+        Ok(())
     }
 
     pub fn retry(&self, location: Option<&Path>, failed_only: bool) -> Result<()> {
@@ -622,6 +709,61 @@ mod tests {
             folder: false,
         };
         Ok((d, Store::open(Path::new(":memory:"))?, s, f))
+    }
+    #[test]
+    fn exclusions_remove_queued_files_checkpoints_vectors_and_stale_scan_writes() -> Result<()> {
+        let (_dir, store, mut settings, file) = fixture()?;
+        let mut pending = file.clone();
+        pending.uri.push_str("-queued");
+        pending.path.set_file_name("Queued.txt");
+        store.discover(&file, 1)?;
+        store.discover(&pending, 1)?;
+        let chunk = StoredChunk {
+            text: "private text".into(),
+            vector: Some(query_vector()),
+            page: None,
+            seconds: None,
+        };
+        assert!(store.checkpoint_for(&file, "private-hash", "model", 0, &chunk)?);
+        store.complete(&file.uri, "private-hash")?;
+        assert!(store.checkpoint_for(&pending, "partial-hash", "model", 0, &chunk)?);
+        settings.excluded_folders = settings.folders.clone();
+        store.prune_scope(&settings)?;
+        assert_eq!(store.counts()?.files, 0);
+        assert_eq!(store.content_progress("private-hash")?, 0);
+        assert_eq!(store.content_progress("partial-hash")?, 0);
+        assert!(store.activity()?.is_empty());
+        // A different connection still holding an old scan/file snapshot cannot restore it.
+        store.discover(&file, 1)?;
+        assert!(!store.checkpoint_for(&file, "private-hash", "model", 0, &chunk)?);
+        assert_eq!(store.counts()?.pending, 0);
+        assert_eq!(store.content_progress("private-hash")?, 0);
+        Ok(())
+    }
+    #[test]
+    fn exclusions_preserve_vectors_for_an_included_duplicate() -> Result<()> {
+        let (_dir, store, mut settings, file) = fixture()?;
+        let mut copy = file.clone();
+        copy.uri.push_str("-copy");
+        copy.path.set_file_name("Copy.txt");
+        store.discover(&file, 1)?;
+        store.discover(&copy, 1)?;
+        let chunk = StoredChunk {
+            text: "shared text".into(),
+            vector: Some(query_vector()),
+            page: None,
+            seconds: None,
+        };
+        store.checkpoint_for(&file, "shared-hash", "model", 0, &chunk)?;
+        store.finish_content("shared-hash")?;
+        store.complete(&file.uri, "shared-hash")?;
+        store.complete(&copy.uri, "shared-hash")?;
+        settings.excluded_folders.push(file.path.clone());
+        store.prune_scope(&settings)?;
+        assert_eq!(store.counts()?.files, 1);
+        assert!(store.cached("shared-hash", "model")?);
+        assert_eq!(store.content_progress("shared-hash")?, 1);
+        Ok(())
     }
     #[test]
     fn exact_words_join_valid_embeddings_and_survive_reopen() -> Result<()> {
