@@ -301,7 +301,11 @@ pub fn run(paths: Paths) -> Result<()> {
                                 }) {
                                     Ok(store) => store,
                                     Err(error) => {
-                                        paths.save(&previous).context("Could not restore previous preferences")?;
+                                        if let Err(restore) = paths.save(&previous) {
+                                            return Err(error.context(format!(
+                                                "Could not update the index scope, and could not restore previous preferences: {restore:#}"
+                                            )));
+                                        }
                                         return Err(error.context("Could not update the index scope; previous preferences were restored"));
                                     }
                                 };
