@@ -116,12 +116,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install bottled GNOME dependencies
+      - name: Install Homebrew and host development dependencies
         shell: bash
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           brew update
-          brew install ffmpeg poppler libarchive
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config xvfb xauth dbus-x11 libvulkan1
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"

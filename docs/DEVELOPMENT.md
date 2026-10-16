@@ -1,7 +1,7 @@
 # Development
 
 Use a recent Linux GNOME desktop, Rust 1.99.0 (pinned in `rust-toolchain.toml`),
-GTK4/libadwaita development headers, TinySPARQL, and the native media readers.
+GTK4/libadwaita and GLib development tools, TinySPARQL, and system media readers.
 On Fedora 45 or Ubuntu 26.10, `scripts/ci-deps.sh` records the distribution packages
 used by CI; run it only in a disposable development machine/container or install
 the listed packages through your package manager.
@@ -16,13 +16,16 @@ cargo run -- prepare-model
 `prepare-model` downloads and verifies the real 865 MB model. First inference
 automatically installs the selected official prebuilt llama.cpp runtime. Install
 `openssl3-libs` on Fedora or `libssl3t64` on Ubuntu for that runtime; the Homebrew
-cask supplies `openssl@3` automatically. No
+cask supplies `openssl@3` only if the host lacks the OpenSSL 3 ABI. No
 inference compilation, GPU SDK, or manually configured server is needed.
 
 The embedded `data/runtimes.json` pins official release URLs, byte sizes, and
 SHA-256 digests for CPU, Vulkan, and CUDA on both architectures. To update the
 runtime, use GitHub's release asset digests, update the pipeline fingerprint in
 `src/model.rs`, and run the reference and multimodal tests before merging.
+The cask declares no media formulas. Homebrew lifecycle tests assert an empty
+formula dependency graph on the Ubuntu hosts; native tests use distro readers.
+
 For offline development, `GSEEK_RUNTIME_DIR` can point to a directory containing
 unmodified upstream distributions in `cpu/`, `vulkan/`, and/or `cuda/`.
 

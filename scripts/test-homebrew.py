@@ -23,7 +23,7 @@ digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
     tap = Path(temporary)
     (tap / "Casks").mkdir()
-    (tap / "Casks/gseek.rb").write_text(cask.render("0.1.0", archive.as_uri(), digest, digest))
+    (tap / "Casks/gseek.rb").write_text(cask.render("0.1.1", archive.as_uri(), digest, digest))
     run("git", "init", str(tap))
     run("git", "-C", str(tap), "add", "Casks/gseek.rb")
     run("git", "-C", str(tap), "-c", "user.name=GSeek CI", "-c", "user.email=ci@example.invalid", "commit", "-m", "Test current GSeek build")
@@ -31,6 +31,8 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
     installed = False
     try:
         run("brew", "trust", "fariszr/gseek-ci")
+        dependencies = subprocess.check_output(["brew", "deps", "--cask", "fariszr/gseek-ci/gseek"], text=True).strip()
+        assert not dependencies, f"GSeek must reuse this host's OpenSSL and readers; requested: {dependencies}"
         run("brew", "install", "--cask", "fariszr/gseek-ci/gseek")
         installed = True
         run("gseek", "--version")
@@ -46,13 +48,15 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         for path in [desktop, service, provider, autostart]:
             assert path.is_file(), path
         assert "/.local/share/gseek-app/bin/gseek" in desktop.read_text()
+        icon = Path(next(line[5:] for line in desktop.read_text().splitlines() if line.startswith("Icon=")))
+        assert icon.is_absolute() and icon.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         sentinel = data / "gseek/keep-index-data.txt"
         sentinel.write_text("Preserved across upgrades and uninstall")
         run("brew", "reinstall", "--cask", "fariszr/gseek-ci/gseek")
         run("gseek", "--version")
         run("brew", "uninstall", "--cask", "gseek")
         installed = False
-        for path in [desktop, service, provider, autostart]:
+        for path in [desktop, service, provider, autostart, icon]:
             assert not path.exists(), f"Stale registration: {path}"
         assert sentinel.is_file()
     finally:

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::Read,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -217,17 +218,14 @@ pub fn read(
         );
     }
     if matches!(ext.as_str(), "docx" | "odt") {
-        // Libarchive's tar safely extracts a single member to stdout; no archive paths are written to disk.
+        // Read one ZIP member to stdout; no archive paths are written to disk.
         let member = if ext == "docx" {
             "word/document.xml"
         } else {
             "content.xml"
         };
         let xml = run_output(
-            Command::new(tool("bsdtar"))
-                .args(["-xOf"])
-                .arg(p)
-                .arg(member),
+            Command::new(tool("unzip")).arg("-p").arg(p).arg(member),
             temp.path(),
             MAX_TEXT_BYTES,
         )?;
@@ -428,11 +426,73 @@ fn ffmpeg_image(input: &Path, output: &Path, seconds: Option<u64>, temp: &Path) 
     Ok(())
 }
 
-pub fn tool(name: &str) -> PathBuf {
+fn executable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+fn resolve_tool(name: &str, directories: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    directories
+        .into_iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|path| executable(path))
+}
+
+pub fn find_tool(name: &str) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("GSEEK_TOOLS") {
-        return PathBuf::from(dir).join(name);
+        let path = PathBuf::from(dir).join(name);
+        return executable(&path).then_some(path);
     }
-    PathBuf::from(name)
+    resolve_tool(
+        name,
+        ["/usr/bin", "/bin", "/usr/local/bin"]
+            .into_iter()
+            .map(PathBuf::from)
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )),
+    )
+}
+
+pub fn tool(name: &str) -> PathBuf {
+    find_tool(name).unwrap_or_else(|| {
+        std::env::var_os("GSEEK_TOOLS")
+            .map(|dir| PathBuf::from(dir).join(name))
+            .unwrap_or_else(|| PathBuf::from(name))
+    })
+}
+
+pub fn reader_status() -> Vec<(&'static str, String)> {
+    [
+        ("PDF Documents", &["pdfinfo", "pdftotext", "pdftoppm"][..], "poppler-utils"),
+        ("Images, Audio, and Video", &["ffmpeg", "ffprobe"][..], "ffmpeg (Fedora: ffmpeg-free)"),
+        ("Office Documents", &["unzip"][..], "unzip"),
+    ].into_iter().map(|(title, tools, package)| {
+        let missing: Vec<_> = tools.iter().filter(|name| find_tool(name).is_none()).copied().collect();
+        let description = if missing.is_empty() {
+            "Available from installed tools".into()
+        } else {
+            format!("Unavailable: {}. Install {package} with your system package manager, then retry affected files.", missing.join(", "))
+        };
+        (title, description)
+    }).collect()
+}
+
+fn reader_help(program: &std::ffi::OsStr) -> String {
+    let name = Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy();
+    let package = match name.as_ref() {
+        "ffmpeg" | "ffprobe" => "ffmpeg (Fedora: ffmpeg-free)",
+        "pdfinfo" | "pdftotext" | "pdftoppm" => "poppler-utils",
+        "unzip" => "unzip",
+        _ => "the corresponding program",
+    };
+    format!(
+        "Cannot start {name}. Install {package} with your system package manager, then choose Retry Failed in GSeek."
+    )
 }
 
 pub fn run_output(command: &mut Command, temp: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -456,12 +516,9 @@ pub fn run_output(command: &mut Command, temp: &Path, limit: u64) -> Result<Vec<
             Ok(())
         });
     }
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "Cannot start {:?}; reinstall GSeek to restore its readers",
-            command.get_program()
-        )
-    })?;
+    let mut child = command
+        .spawn()
+        .with_context(|| reader_help(command.get_program()))?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -518,6 +575,41 @@ fn strip_xml(xml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_system_reader_wins_and_existing_path_reader_is_a_fallback() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let system = root.path().join("system");
+        let brew = root.path().join("homebrew");
+        for (dir, response) in [(&system, "system"), (&brew, "homebrew")] {
+            fs::create_dir(dir)?;
+            let program = dir.join("ffmpeg");
+            fs::write(&program, format!("#!/bin/sh\nprintf {response}"))?;
+            fs::set_permissions(program, fs::Permissions::from_mode(0o755))?;
+        }
+        let selected = resolve_tool("ffmpeg", [system.clone(), brew.clone()]).unwrap();
+        assert_eq!(Command::new(selected).output()?.stdout, b"system");
+        fs::set_permissions(system.join("ffmpeg"), fs::Permissions::from_mode(0o644))?;
+        let selected = resolve_tool("ffmpeg", [system, brew]).unwrap();
+        assert_eq!(Command::new(selected).output()?.stdout, b"homebrew");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_reader_explains_system_install_and_retry() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let error = run_output(
+            &mut Command::new(root.path().join("pdftotext")),
+            root.path(),
+            1024,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("poppler-utils"));
+        assert!(message.contains("Retry Failed"));
+        assert!(!message.contains("reinstall GSeek"));
+        Ok(())
+    }
+
     #[test]
     fn multilingual_chunking_is_utf8_safe_and_overlaps() {
         let text = "مرحبا Welt 🌍 ".repeat(800);

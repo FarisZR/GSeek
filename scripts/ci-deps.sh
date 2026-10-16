@@ -10,14 +10,14 @@ if command -v apt-get >/dev/null; then
   apt-get install -y --no-install-recommends build-essential pkg-config curl ca-certificates git libssl3t64 \
     libgtk-4-dev libadwaita-1-dev "$sparql_dev" "$sparql_gir" python3-gi python3-gi-cairo \
     dbus-daemon dbus-x11 xvfb xauth util-linux \
-    mesa-vulkan-drivers vulkan-tools poppler-utils ffmpeg libarchive-tools gnome-shell \
+    mesa-vulkan-drivers vulkan-tools poppler-utils ffmpeg unzip tar gnome-shell \
     gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-noto-core
 elif command -v dnf >/dev/null; then
   dnf install -y gcc gcc-c++ pkgconf-pkg-config curl ca-certificates git openssl3-libs \
     gtk4-devel libadwaita-devel tinysparql-devel python3-gobject python3-cairo \
     dbus-daemon dbus-x11 xorg-x11-server-Xvfb xorg-x11-xauth util-linux-core \
     mesa-vulkan-drivers vulkan-tools \
-    poppler-utils ffmpeg-free libarchive bsdtar gnome-shell gsettings-desktop-schemas \
+    poppler-utils ffmpeg-free unzip tar gnome-shell gsettings-desktop-schemas \
     adwaita-icon-theme google-noto-sans-fonts google-noto-sans-arabic-fonts
 else
   echo 'Unsupported CI image' >&2; exit 1

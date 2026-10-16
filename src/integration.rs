@@ -77,6 +77,8 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
     }
     let data = xdg("XDG_DATA_HOME", ".local/share");
     let config = xdg("XDG_CONFIG_HOME", ".config");
+    let icon = data.join(format!("icons/hicolor/512x512/apps/{APP_ID}.png"));
+    let icon = icon.to_str().context("Icon path must be UTF-8")?;
     let exec = desktop_quote(launcher)?;
     let dbus_exec = exec.replace("%%", "%");
     let mut manifest = load(paths)?;
@@ -84,7 +86,7 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
         (
             data.join(format!("applications/{APP_ID}.desktop")),
             format!(
-                "[Desktop Entry]\nType=Application\nName=GSeek\nComment=Find your files by what you remember\nExec={exec}\nIcon={APP_ID}\nTerminal=false\nCategories=GNOME;GTK;Utility;\nKeywords=Search;Files;Semantic;\nStartupNotify=true\n"
+                "[Desktop Entry]\nType=Application\nName=GSeek\nComment=Find your files by what you remember\nExec={exec}\nIcon={icon}\nTerminal=false\nCategories=GNOME;GTK;Utility;\nKeywords=Search;Files;Semantic;\nStartupNotify=true\n"
             ),
         ),
         (
@@ -94,7 +96,7 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
         (
             config.join(format!("autostart/{APP_ID}.desktop")),
             format!(
-                "[Desktop Entry]\nType=Application\nName=GSeek\nExec={exec} service\nIcon={APP_ID}\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\nOnlyShowIn=GNOME;\n"
+                "[Desktop Entry]\nType=Application\nName=GSeek\nExec={exec} service\nIcon={icon}\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\nOnlyShowIn=GNOME;\n"
             ),
         ),
         (
@@ -102,12 +104,19 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
             include_str!("../data/io.github.FarisZR.GSeek.svg").into(),
         ),
     ];
+    let mut registrations: Vec<(PathBuf, Vec<u8>)> = registrations
+        .into_iter()
+        .map(|(path, content)| (path, content.into_bytes()))
+        .collect();
+    registrations.push((
+        data.join(format!("icons/hicolor/512x512/apps/{APP_ID}.png")),
+        include_bytes!("../data/icons/512x512/apps/io.github.FarisZR.GSeek.png").to_vec(),
+    ));
     // Refuse to overwrite another installation or a user's edits. Validate all entries before writing.
     for (path, content) in &registrations {
         if path.exists() {
             let existing = digest(&fs::read(path)?);
-            if existing != digest(content.as_bytes()) && manifest.files.get(path) != Some(&existing)
-            {
+            if existing != digest(content) && manifest.files.get(path) != Some(&existing) {
                 bail!(
                     "{} is not owned by this GSeek installation; it was preserved",
                     path.display()
@@ -117,8 +126,8 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
     }
     for (path, content) in registrations {
         fs::create_dir_all(path.parent().unwrap())?;
-        atomic_write(&path, content.as_bytes())?;
-        manifest.files.insert(path, digest(content.as_bytes()));
+        atomic_write(&path, &content)?;
+        manifest.files.insert(path, digest(&content));
         save(paths, &manifest)?;
     }
     let _ = std::process::Command::new("update-desktop-database")

@@ -290,6 +290,9 @@ class EndToEnd(unittest.TestCase):
         subprocess.run([BINARY, "integrate"], check=True)
         desktop = ROOT / "data/applications/io.github.FarisZR.GSeek.desktop"
         self.assertIn(str(Path(BINARY).resolve()), desktop.read_text())
+        icon = Path(next(line[5:] for line in desktop.read_text().splitlines() if line.startswith("Icon=")))
+        self.assertTrue(icon.is_absolute(), "Desktop icon must not depend on theme cache lookup")
+        self.assertEqual(icon.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         # The complete lifecycle is checked in a separate sandbox so it cannot stop this test service.
         root = ROOT / "install-test"
         env = {**os.environ, "XDG_DATA_HOME": str(root / "data"), "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache")}

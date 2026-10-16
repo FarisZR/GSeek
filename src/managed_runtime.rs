@@ -79,7 +79,7 @@ pub fn directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
         .with_context(|| {
             format!("Cannot download the {name} runtime; check your connection and retry setup")
         })?;
-        let status = Command::new(crate::extract::tool("bsdtar"))
+        let status = Command::new(crate::extract::tool("tar"))
             .arg("-xf")
             .arg(&archive)
             .arg("-C")
@@ -91,7 +91,7 @@ pub fn directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
                 "--no-same-permissions",
             ])
             .stdin(Stdio::null())
-            .status()?;
+            .status().context("Cannot unpack the runtime: install tar with your system package manager and retry setup")?;
         if !status.success() {
             bail!("Cannot unpack the verified upstream {name} runtime");
         }
