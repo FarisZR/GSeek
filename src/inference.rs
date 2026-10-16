@@ -280,7 +280,9 @@ impl Worker {
                 "--threads-batch",
                 &threads,
                 "--gpu-layers",
-                if backend == Backend::Cpu { "0" } else { "99" },
+                // Let upstream fit offloaded layers to available VRAM. An explicit
+                // device still requires that GPU backend; it never silently changes it.
+                if backend == Backend::Cpu { "0" } else { "auto" },
                 "--device",
                 match backend {
                     Backend::Cpu => "none",
