@@ -8,6 +8,7 @@ use anyhow::Result;
 use glib::variant::ToVariant;
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::Rc,
     time::Duration,
 };
@@ -21,10 +22,21 @@ struct Window {
     counts: gtk::Label,
     progress: gtk::ProgressBar,
     current: gtk::Label,
+    backend: gtk::Label,
+    backend_rows: RefCell<Vec<glib::WeakRef<adw::ActionRow>>>,
+    settings_queue: RefCell<VecDeque<SettingsWrite>>,
+    saving_settings: Cell<bool>,
+    settings_hold: RefCell<Option<gio::ApplicationHoldGuard>>,
     logs: gtk::ListBox,
     pause: gtk::Button,
     refreshing: Cell<bool>,
     paths: Paths,
+}
+
+struct SettingsWrite {
+    method: &'static str,
+    value: serde_json::Value,
+    complete: Option<Box<dyn FnOnce(bool)>>,
 }
 
 pub fn run(paths: Paths) -> Result<()> {
@@ -142,6 +154,9 @@ impl Window {
         status_detail.set_xalign(0.0);
         status_detail.set_selectable(true);
         activity_box.append(&status_detail);
+        let backend_status = label("", "dim-label");
+        backend_status.set_xalign(0.0);
+        activity_box.append(&backend_status);
         let hint = label("Press Super and describe what you remember.", "dim-label");
         hint.set_xalign(0.0);
         activity_box.append(&hint);
@@ -196,6 +211,11 @@ impl Window {
             counts,
             progress,
             current: current_file,
+            backend: backend_status,
+            backend_rows: RefCell::new(Vec::new()),
+            settings_queue: RefCell::new(VecDeque::new()),
+            saving_settings: Cell::new(false),
+            settings_hold: RefCell::new(None),
             logs,
             pause,
             refreshing: Cell::new(false),
@@ -326,6 +346,16 @@ impl Window {
                             0.0
                         });
                         ui.current.set_text(&s.current);
+                        let backend = s.backend_description();
+                        ui.backend.set_text(&format!("Backend: {backend}"));
+                        ui.backend_rows.borrow_mut().retain(|row| {
+                            if let Some(row) = row.upgrade() {
+                                row.set_subtitle(&backend);
+                                true
+                            } else {
+                                false
+                            }
+                        });
                         ui.pause.set_label(if s.paused {
                             "Resume Indexing"
                         } else {
@@ -387,32 +417,66 @@ impl Window {
             return;
         }
         button.set_sensitive(false);
-        let paths = self.paths.clone();
-        let weak = Rc::downgrade(self);
         let close = dialog.downgrade();
         let button = button.clone();
+        self.queue_settings(SettingsWrite {
+            method: "Configure",
+            value: serde_json::to_value(settings).unwrap(),
+            complete: Some(Box::new(move |saved| {
+                button.set_sensitive(true);
+                if saved && let Some(dialog) = close.upgrade() {
+                    dialog.close();
+                }
+            })),
+        });
+    }
+
+    fn save_preference(self: &Rc<Self>, patch: serde_json::Value) {
+        self.queue_settings(SettingsWrite {
+            method: "UpdateSettings",
+            value: patch,
+            complete: None,
+        });
+    }
+    fn queue_settings(self: &Rc<Self>, request: SettingsWrite) {
+        if self.settings_hold.borrow().is_none() {
+            *self.settings_hold.borrow_mut() = self.window.application().map(|app| app.hold());
+        }
+        self.settings_queue.borrow_mut().push_back(request);
+        self.save_next();
+    }
+    fn save_next(self: &Rc<Self>) {
+        if self.saving_settings.get() {
+            return;
+        }
+        let Some(request) = self.settings_queue.borrow_mut().pop_front() else {
+            self.settings_hold.borrow_mut().take();
+            return;
+        };
+        self.saving_settings.set(true);
+        let paths = self.paths.clone();
+        let weak = Rc::downgrade(self);
+        let method = request.method;
+        let value = request.value;
         spawn(
             move || {
-                integration::install(&paths, &service::launcher()?)?;
-                service::call(
-                    "Configure",
-                    Some(&(serde_json::to_string(&settings)?,).to_variant()),
-                )?;
+                if method == "Configure" {
+                    integration::install(&paths, &service::launcher()?)?;
+                }
+                service::call(method, Some(&(value.to_string(),).to_variant()))?;
                 Ok(())
             },
             move |result| {
-                button.set_sensitive(true);
+                if let Some(complete) = request.complete {
+                    complete(result.is_ok());
+                }
                 if let Some(ui) = weak.upgrade() {
-                    match result {
-                        Ok(()) => {
-                            if let Some(dialog) = close.upgrade() {
-                                dialog.close();
-                            }
-                            ui.main_stack.set_visible_child_name("library");
-                            ui.refresh();
-                        }
-                        Err(error) => ui.error(&format!("{error:#}")),
+                    ui.saving_settings.set(false);
+                    if let Err(error) = result {
+                        ui.error(&format!("Could not save preference: {error:#}"));
                     }
+                    ui.refresh();
+                    ui.save_next();
                 }
             },
         );
@@ -455,7 +519,7 @@ impl Window {
         folders.set_selection_mode(gtk::SelectionMode::None);
         fill_folders(&folders, &draft, false, self);
         locations.add(&folders);
-        let add = gtk::Button::with_label("Add Folder…");
+        let add = gtk::Button::with_label("Add Folders…");
         add.set_valign(gtk::Align::Center);
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folders, &draft, false, self);
@@ -535,13 +599,13 @@ impl Window {
             .title("Search")
             .icon_name("system-search-symbolic")
             .build();
-        let locations=adw::PreferencesGroup::builder().title("Search Locations").description("GSeek uses GNOME LocalSearch. Only files in both these folders and GNOME’s search locations are discovered. Hidden folders, credentials, caches, and build outputs are excluded.").build();
+        let locations=adw::PreferencesGroup::builder().title("Search Locations").description("Changes are saved automatically. GSeek uses GNOME LocalSearch. Only files in both these folders and GNOME’s search locations are discovered. Hidden folders, credentials, caches, and build outputs are excluded.").build();
         let folder_list = gtk::ListBox::new();
         folder_list.add_css_class("boxed-list");
         folder_list.set_selection_mode(gtk::SelectionMode::None);
         fill_folders(&folder_list, &draft, false, self);
         locations.add(&folder_list);
-        let add = gtk::Button::with_label("Add Folder…");
+        let add = gtk::Button::with_label("Add Folders…");
         add.set_valign(gtk::Align::Center);
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folder_list, &draft, false, self);
@@ -566,7 +630,7 @@ impl Window {
         exclude_list.set_selection_mode(gtk::SelectionMode::None);
         fill_folders(&exclude_list, &draft, true, self);
         exclusions.add(&exclude_list);
-        let exclude = gtk::Button::with_label("Exclude Folder…");
+        let exclude = gtk::Button::with_label("Exclude Folders…");
         exclude.set_valign(gtk::Align::Center);
         exclusions.set_header_suffix(Some(&exclude));
         connect_folder_picker(&exclude, &self.window, &exclude_list, &draft, true, self);
@@ -604,11 +668,6 @@ impl Window {
         integration_group.add(&replace);
         integration_group.add(&scope);
         page.add(&integration_group);
-        let apply_group = adw::PreferencesGroup::new();
-        let apply = gtk::Button::with_label("Apply Changes");
-        apply.add_css_class("suggested-action");
-        apply_group.add(&apply);
-        page.add(&apply_group);
         dialog.add(&page);
 
         let inference = adw::PreferencesPage::builder()
@@ -633,6 +692,26 @@ impl Window {
             })
             .build();
         local.add(&backend);
+        let active_backend = adw::ActionRow::builder()
+            .title("Active Backend")
+            .subtitle("Checking backend status…")
+            .build();
+        local.add(&active_backend);
+        self.backend_rows
+            .borrow_mut()
+            .push(active_backend.downgrade());
+        let weak = Rc::downgrade(self);
+        backend.connect_selected_notify(move |row| {
+            if let Some(ui) = weak.upgrade() {
+                let selected = match row.selected() {
+                    1 => Backend::Cpu,
+                    2 => Backend::Vulkan,
+                    3 => Backend::Cuda,
+                    _ => Backend::Auto,
+                };
+                ui.save_preference(serde_json::json!({"backend": selected}));
+            }
+        });
         inference.add(&local);
         let external=adw::PreferencesGroup::builder().title("Existing Inference Endpoint").description("Advanced: OpenAI-compatible text embeddings only. Images, scanned PDFs, audio, and video require managed inference. The endpoint must identify an EmbeddingGemma 2 model and return 768 dimensions.").build();
         let use_external = adw::SwitchRow::builder()
@@ -703,43 +782,92 @@ impl Window {
         maintenance.add(&storage);
         diagnostics.add(&maintenance);
         dialog.add(&diagnostics);
+        connect_switch(&images, "images", self);
+        connect_switch(&media, "audio_video", self);
+        connect_switch(&replace, "search_enabled", self);
+        extensions.set_show_apply_button(true);
         let weak = Rc::downgrade(self);
-        let close = dialog.downgrade();
-        apply.connect_clicked(move |button| {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let mut settings = draft.borrow().clone();
-            settings.images = images.is_active();
-            settings.audio_video = media.is_active();
-            settings.excluded_extensions = extensions
-                .text()
-                .split(',')
-                .map(|s| s.trim().trim_start_matches('.').to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect();
-            settings.backend = match backend.selected() {
-                1 => Backend::Cpu,
-                2 => Backend::Vulkan,
-                3 => Backend::Cuda,
-                _ => Backend::Auto,
-            };
-
-            settings.external = if use_external.is_active() {
-                Some(External {
-                    url: address.text().to_string(),
-                    model: model.text().to_string(),
-                    allow_remote: consent.is_active(),
-                })
-            } else {
-                None
-            };
-            settings.search_enabled = replace.is_active();
-            if let Some(dialog) = close.upgrade() {
-                ui.apply_settings(settings, dialog.upcast_ref(), button);
+        extensions.connect_apply(move |row| {
+            if let Some(ui) = weak.upgrade() {
+                let values: Vec<_> = row
+                    .text()
+                    .split(',')
+                    .map(|s| s.trim().trim_start_matches('.').to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                ui.save_preference(serde_json::json!({"excluded_extensions": values}));
             }
         });
+        let weak = Rc::downgrade(self);
+        let endpoint = use_external.downgrade();
+        let endpoint_address = address.downgrade();
+        let endpoint_model = model.downgrade();
+        let endpoint_consent = consent.downgrade();
+        let save_endpoint: Rc<dyn Fn()> = Rc::new(move || {
+            let (
+                Some(endpoint),
+                Some(endpoint_address),
+                Some(endpoint_model),
+                Some(endpoint_consent),
+            ) = (
+                endpoint.upgrade(),
+                endpoint_address.upgrade(),
+                endpoint_model.upgrade(),
+                endpoint_consent.upgrade(),
+            )
+            else {
+                return;
+            };
+            if let Some(ui) = weak.upgrade() {
+                let value = if endpoint.is_active() {
+                    Some(External {
+                        url: endpoint_address.text().to_string(),
+                        model: endpoint_model.text().to_string(),
+                        allow_remote: endpoint_consent.is_active(),
+                    })
+                } else {
+                    None
+                };
+                ui.save_preference(serde_json::json!({"external": value}));
+            }
+        });
+        let save = save_endpoint.clone();
+        use_external.connect_active_notify(move |_| save());
+        let save = save_endpoint.clone();
+        consent.connect_active_notify(move |_| save());
+        for row in [address, model] {
+            row.set_show_apply_button(true);
+            let save = save_endpoint.clone();
+            row.connect_apply(move |_| save());
+        }
         dialog.present(Some(&self.window));
+    }
+}
+
+fn connect_switch(row: &adw::SwitchRow, key: &'static str, ui: &Rc<Window>) {
+    let weak = Rc::downgrade(ui);
+    row.connect_active_notify(move |row| {
+        if let Some(ui) = weak.upgrade() {
+            ui.save_preference(serde_json::json!({(key): row.is_active()}));
+        }
+    });
+}
+fn save_folders(ui: &Rc<Window>, draft: &Rc<RefCell<Settings>>, excluded: bool) {
+    let settings = draft.borrow();
+    let (key, folders) = if excluded {
+        ("excluded_folders", &settings.excluded_folders)
+    } else {
+        ("folders", &settings.folders)
+    };
+    ui.save_preference(serde_json::json!({(key): folders}));
+}
+fn add_selected_folders(folders: &mut Vec<std::path::PathBuf>, selected: &gio::ListModel) {
+    for file in selected.iter::<gio::File>().flatten() {
+        if let Some(path) = file.path()
+            && !folders.contains(&path)
+        {
+            folders.push(path);
+        }
     }
 }
 
@@ -821,6 +949,7 @@ fn fill_folders(
             folders.retain(|p| p != &path);
             drop(s);
             if let Some(ui) = weak.upgrade() {
+                save_folders(&ui, &draft, excluded);
                 fill_folders(&refresh_list, &draft, excluded, &ui);
             }
         });
@@ -842,30 +971,27 @@ fn connect_folder_picker(
     button.connect_clicked(move |_| {
         let picker = gtk::FileDialog::builder()
             .title(if excluded {
-                "Exclude Folder"
+                "Exclude Folders"
             } else {
-                "Choose Search Folder"
+                "Choose Search Folders"
             })
             .modal(true)
             .build();
         let list = list.clone();
         let draft = draft.clone();
         let weak = weak.clone();
-        picker.select_folder(Some(&parent), gio::Cancellable::NONE, move |result| {
-            if let Ok(file) = result
-                && let Some(path) = file.path()
-            {
+        picker.select_multiple_folders(Some(&parent), gio::Cancellable::NONE, move |result| {
+            if let Ok(files) = result {
                 let mut s = draft.borrow_mut();
                 let folders = if excluded {
                     &mut s.excluded_folders
                 } else {
                     &mut s.folders
                 };
-                if !folders.contains(&path) {
-                    folders.push(path);
-                }
+                add_selected_folders(folders, &files);
                 drop(s);
                 if let Some(ui) = weak.upgrade() {
+                    save_folders(&ui, &draft, excluded);
                     fill_folders(&list, &draft, excluded, &ui);
                 }
             }
@@ -895,6 +1021,40 @@ mod tests {
         path::{Path, PathBuf},
         time::Instant,
     };
+
+    #[test]
+    fn folder_selection_adds_the_whole_batch_without_duplicates() {
+        let selected = gio::ListStore::new::<gio::File>();
+        selected.append(&gio::File::for_path("/home/test/Documents"));
+        selected.append(&gio::File::for_path("/home/test/Pictures"));
+        selected.append(&gio::File::for_path("/home/test/Documents"));
+        selected.append(&gio::File::for_uri("https://example.com/nonlocal"));
+        for mut folders in [vec![], vec![PathBuf::from("/home/test/Documents")]] {
+            add_selected_folders(&mut folders, selected.upcast_ref());
+            assert_eq!(
+                folders,
+                vec![
+                    PathBuf::from("/home/test/Documents"),
+                    PathBuf::from("/home/test/Pictures")
+                ]
+            );
+        }
+    }
+    fn backend_row(widget: &gtk::Widget) -> Option<adw::ComboRow> {
+        if let Some(row) = widget.downcast_ref::<adw::ComboRow>()
+            && row.title() == "Compute Backend"
+        {
+            return Some(row.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(row) = backend_row(&widget) {
+                return Some(row);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
 
     fn until(mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(45);
@@ -998,6 +1158,32 @@ mod tests {
         until(|| frame.elapsed() > Duration::from_millis(400));
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("preferences.png"));
+        }
+        if ui.paths.load().unwrap().backend == Backend::Cpu {
+            let dialog = ui.window.visible_dialog().unwrap();
+            let backend = backend_row(dialog.upcast_ref()).unwrap();
+            backend.set_selected(0);
+            backend.set_selected(1);
+            backend.set_selected(0);
+            // Close without a separate save action, then reopen and verify persistence.
+            close_dialog(&ui.window);
+            until(|| {
+                !ui.saving_settings.get() && ui.paths.load().unwrap().backend == Backend::Auto
+            });
+            ui.preferences(None);
+            until(|| ui.window.visible_dialog().is_some());
+            let dialog = ui.window.visible_dialog().unwrap();
+            let backend = backend_row(dialog.upcast_ref()).unwrap();
+            assert_eq!(backend.selected(), 0);
+            backend.set_selected(1);
+            until(|| ui.paths.load().unwrap().backend == Backend::Cpu);
+            until(|| {
+                service::read_status().is_ok_and(|s| {
+                    s.ready && s.requested_backend == Backend::Cpu && s.backend == "CPU"
+                })
+            });
+            ui.refresh();
+            until(|| ui.backend.text() == "Backend: CPU");
         }
         close_dialog(&ui.window);
         ui.setup();

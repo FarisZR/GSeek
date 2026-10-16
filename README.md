@@ -87,6 +87,13 @@ the whole library. Activity shows the current file, completed work, skipped
 formats, and failure details. Preferences cover included and excluded folders,
 file types, hardware, and advanced inference settings.
 
+Preferences save changes immediately. Select multiple folders at once to include
+or exclude them. Exclusions remove queued files and their unreferenced vectors
+from the index immediately, including saved checkpoints. Activity and Inference
+preferences show the backend Automatic actually selected. Switching backends
+interrupts the previous worker, reports download/startup progress, and preserves
+an explicit choice if its driver or memory allocation fails.
+
 LocalSearch notifications pick up new, changed, renamed, and deleted files.
 Periodic reconciliation repairs missed events. Content hashes reuse embeddings
 for unchanged files and renames. Each document or media part is checkpointed,

@@ -23,7 +23,7 @@ digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
     tap = Path(temporary)
     (tap / "Casks").mkdir()
-    (tap / "Casks/gseek.rb").write_text(cask.render("0.1.1", archive.as_uri(), digest, digest))
+    (tap / "Casks/gseek.rb").write_text(cask.render("0.1.2", archive.as_uri(), digest, digest))
     run("git", "init", str(tap))
     run("git", "-C", str(tap), "add", "Casks/gseek.rb")
     run("git", "-C", str(tap), "-c", "user.name=GSeek CI", "-c", "user.email=ci@example.invalid", "commit", "-m", "Test current GSeek build")
