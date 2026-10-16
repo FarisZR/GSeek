@@ -107,7 +107,8 @@ pub fn download_verified(
         .write(true)
         .mode(0o600)
         .open(lock_path)?;
-    download_lock.lock()?;
+    lock_interruptibly(&download_lock, || progress(0, bytes))?;
+    progress(0, bytes)?;
     if verify_download(dest, bytes, sha256)? {
         return Ok(());
     }
@@ -180,6 +181,20 @@ pub fn download_verified(
     }
     fs::rename(partial, dest)?;
     Ok(())
+}
+
+pub(crate) fn lock_interruptibly(
+    file: &fs::File,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    loop {
+        check()?;
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(50)),
+            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use crate::{
     BUS_NAME, CONTROL_IFACE, CONTROL_PATH, OBJECT_PATH,
-    config::{Paths, Settings},
+    cancellation::{Cancelled, WorkControl},
+    config::{Backend, Paths, Settings},
     discovery, extract,
     inference::Runtime,
     integration, model,
@@ -33,11 +34,29 @@ pub struct Status {
     pub detail: String,
     pub current: String,
     pub backend: String,
+    pub requested_backend: Backend,
     pub progress: f64,
     pub ready: bool,
     pub paused: bool,
     pub counts: Counts,
     pub last_scan: i64,
+}
+impl Status {
+    pub fn backend_description(&self) -> String {
+        if !self.backend.is_empty() {
+            if self.requested_backend == Backend::Auto && !self.backend.starts_with("External") {
+                format!("Automatic · {}", self.backend)
+            } else {
+                self.backend.clone()
+            }
+        } else if self.state == "error" {
+            format!("Unavailable · {} selected", self.requested_backend.label())
+        } else if self.requested_backend == Backend::Auto {
+            "Automatic · selecting a backend".into()
+        } else {
+            format!("Starting {}", self.requested_backend.label())
+        }
+    }
 }
 type Shared = Arc<Mutex<Status>>;
 #[derive(Debug)]
@@ -98,11 +117,12 @@ fn status(shared: &Shared, state: &str, detail: impl Into<String>) {
 
 pub fn run(paths: Paths) -> Result<()> {
     paths.init()?;
-    let _ = paths.load()?;
-    Store::open(&paths.database())?;
+    let initial = paths.load()?;
+    Store::open(&paths.database())?.prune_scope(&initial)?;
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
     let shared = Arc::new(Mutex::new(Status {
+        requested_backend: initial.backend,
         state: "starting".into(),
         detail: "Starting GSeek".into(),
         ..Default::default()
@@ -111,7 +131,9 @@ pub fn run(paths: Paths) -> Result<()> {
     let (discovery_tx, discovery_rx) = mpsc::channel();
     let worker_paths = paths.clone();
     let worker_state = shared.clone();
-    let search = Rc::new(SearchQueue::new(&paths));
+    let work = WorkControl::default();
+    let search = Rc::new(SearchQueue::new(&paths, work.clone()));
+    let worker_control = work.clone();
     let subscriptions = Rc::new(std::cell::RefCell::new(Vec::new()));
     let live_subscriptions = subscriptions.clone();
     let startup_paths = paths.clone();
@@ -256,22 +278,57 @@ pub fn run(paths: Paths) -> Result<()> {
                                 )?,)
                                     .to_variant(),
                             )),
-                            "Configure" => {
+                            "Configure" | "UpdateSettings" => {
                                 let (json,) = parameters
                                     .get::<(String,)>()
                                     .context("Invalid configuration")?;
                                 if json.len() > 65536 {
                                     bail!("Configuration is too large");
                                 }
-                                let mut settings: Settings = serde_json::from_str(&json)?;
-                                settings.configured = true;
+                                let previous = paths.load()?;
+                                let settings = if method == "Configure" {
+                                    let mut settings: Settings = serde_json::from_str(&json)?;
+                                    settings.configured = true;
+                                    settings
+                                } else {
+                                    previous.patched(serde_json::from_str(&json)?)?
+                                };
                                 paths.save(&settings)?;
+                                work.interrupt();
+                                let store = match Store::open(&paths.database()).and_then(|store| {
+                                    store.prune_scope(&settings)?;
+                                    Ok(store)
+                                }) {
+                                    Ok(store) => store,
+                                    Err(error) => {
+                                        paths.save(&previous).context("Could not restore previous preferences")?;
+                                        return Err(error.context("Could not update the index scope; previous preferences were restored"));
+                                    }
+                                };
+                                {
+                                    let mut status = state.lock().unwrap();
+                                    status.ready = false;
+                                    status.paused = settings.paused;
+                                    status.requested_backend = settings.backend;
+                                    status.backend.clear();
+                                    status.current.clear();
+                                    status.counts = store.counts()?;
+                                    status.state = if settings.configured {
+                                        "setup"
+                                    } else {
+                                        "welcome"
+                                    }
+                                    .into();
+                                    status.detail = "Applying preferences".into();
+                                }
                                 if !settings.search_enabled {
                                     integration::disable_search(&paths)?;
                                 }
-                                state.lock().unwrap().ready = false;
-                                state.lock().unwrap().paused = settings.paused;
-                                tx.send(Command::Setup)?;
+                                tx.send(if settings.configured {
+                                    Command::Setup
+                                } else {
+                                    Command::Wake
+                                })?;
                                 control_discovery.send(DiscoveryCommand::Scan)?;
                                 Ok(None)
                             }
@@ -313,8 +370,14 @@ pub fn run(paths: Paths) -> Result<()> {
                                         tx.send(Command::Wake)?;
                                     }
                                     "scan" => control_discovery.send(DiscoveryCommand::Scan)?,
-                                    "retry" => tx.send(Command::Retry)?,
-                                    "setup" => tx.send(Command::Setup)?,
+                                    "retry" | "setup" => {
+                                        work.interrupt();
+                                        tx.send(if command == "retry" {
+                                            Command::Retry
+                                        } else {
+                                            Command::Setup
+                                        })?;
+                                    }
                                     "reindex" => {
                                         tx.send(Command::Reindex(if argument.is_empty() {
                                             None
@@ -404,6 +467,7 @@ pub fn run(paths: Paths) -> Result<()> {
             let discovery_rx = pending_discovery.borrow_mut().take().unwrap();
             let discovery_paths = worker_paths.clone();
             let discovery_state = worker_state.clone();
+            let worker_control = worker_control.clone();
             std::thread::spawn(move || {
                 if let Err(error) = discovery_loop(&discovery_paths, &discovery_state, discovery_rx)
                 {
@@ -419,7 +483,7 @@ pub fn run(paths: Paths) -> Result<()> {
                         10,
                     );
                 }
-                if let Err(e) = index_loop(&worker_paths, &worker_state, rx) {
+                if let Err(e) = index_loop(&worker_paths, &worker_state, rx, &worker_control) {
                     status(&worker_state, "error", format!("{e:#}"));
                 }
             });
@@ -452,7 +516,7 @@ struct SearchQueue {
     ui: Arc<AtomicU64>,
 }
 impl SearchQueue {
-    fn new(paths: &Paths) -> Self {
+    fn new(paths: &Paths, work: WorkControl) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<SearchJob>(32);
         let paths = paths.clone();
         let shell = Arc::new(AtomicU64::new(0));
@@ -479,13 +543,16 @@ impl SearchQueue {
                     continue;
                 }
                 let result = (|| -> Result<Vec<SearchHit>> {
+                    let cancellation = work.token();
                     let settings = paths.load()?;
                     if !settings.configured {
                         bail!("Complete GSeek setup before searching");
                     }
                     let serialized = serde_json::to_string(&settings)?;
-                    if serialized != previous {
-                        runtime = Some(Runtime::new(&paths, &settings, true));
+                    if serialized != previous || runtime.as_ref().is_some_and(Runtime::cancelled) {
+                        runtime = Some(
+                            Runtime::new(&paths, &settings, true).with_cancellation(cancellation),
+                        );
                         previous = serialized;
                     }
                     let runtime = runtime.as_mut().unwrap();
@@ -565,7 +632,6 @@ fn discovery_loop(
             let snapshot = full || last_full.elapsed() >= Duration::from_secs(300);
             let result = (|| -> Result<()> {
                 if snapshot {
-                    store.prune_scope(&settings)?;
                     let generation = store.start_scan()?;
                     discovery::reconcile(&settings, |files| {
                         for file in files {
@@ -617,12 +683,18 @@ fn discovery_loop(
     }
 }
 
-fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>) -> Result<()> {
+fn index_loop(
+    paths: &Paths,
+    shared: &Shared,
+    receiver: mpsc::Receiver<Command>,
+    work: &WorkControl,
+) -> Result<()> {
     let store = Store::open(&paths.database())?;
     let mut settings = paths.load()?;
     let mut runtime = None;
     let mut setup = settings.configured;
     let mut backoff = Instant::now();
+    let mut current_work = work.token();
     loop {
         while let Ok(command) = receiver.try_recv() {
             match command {
@@ -643,15 +715,24 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 Command::Wake => (),
             }
         }
+        if current_work.check().is_err() {
+            runtime = None;
+            current_work = work.token();
+            setup = paths.load()?.configured;
+            backoff = Instant::now();
+        }
         settings = paths.load()?;
         shared.lock().unwrap().paused = settings.paused;
         if setup && Instant::now() >= backoff {
+            runtime = None; // Release the old GPU context before starting another backend.
             let initialized = (|| -> Result<Runtime> {
+                current_work.check()?;
                 shared.lock().unwrap().ready = false;
                 status(shared, "setup", "Preparing private, on-device search");
                 if settings.external.is_none() {
                     let mut last = Instant::now() - Duration::from_secs(1);
                     model::ensure(paths, |name, done, total| {
+                        current_work.check()?;
                         if last.elapsed() > Duration::from_millis(150) || done == total {
                             let mut s = shared.lock().unwrap();
                             s.detail =
@@ -667,7 +748,29 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     })?;
                 }
                 status(shared, "setup", "Checking EmbeddingGemma 2");
-                let mut runtime = Runtime::new(paths, &settings, false);
+                let progress_state = shared.clone();
+                let progress_work = current_work.clone();
+                let mut runtime = Runtime::new(paths, &settings, false)
+                    .with_cancellation(current_work.clone())
+                    .with_progress(move |detail, done, total| {
+                        if progress_work.check().is_ok() {
+                            let mut status = progress_state.lock().unwrap();
+                            status.detail = if total > 0 {
+                                format!(
+                                    "{detail} · {} / {} MB",
+                                    done / 1_000_000,
+                                    total / 1_000_000
+                                )
+                            } else {
+                                detail.into()
+                            };
+                            status.progress = if total > 0 {
+                                done as f64 / total as f64
+                            } else {
+                                0.0
+                            };
+                        }
+                    });
                 runtime.validate()?;
                 let latest = paths.load()?;
                 if latest.backend != settings.backend || latest.external != settings.external {
@@ -675,6 +778,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                         "Inference settings changed; restarting setup with the new configuration"
                     );
                 }
+                current_work.check()?;
                 settings = latest;
                 store.activate_pipeline(&runtime.fingerprint())?;
                 if settings.search_enabled {
@@ -690,6 +794,9 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     setup = false;
                 }
                 Err(e) => {
+                    if e.is::<Cancelled>() || current_work.check().is_err() {
+                        continue;
+                    }
                     status(shared, "error", format!("{e:#}"));
                     shared.lock().unwrap().ready = false;
                     backoff = Instant::now() + Duration::from_secs(30);
@@ -731,6 +838,7 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                     }
                     let mut index = 0;
                     extract::read(&file, &settings, &paths.cache, |part| {
+                        current_work.check()?;
                         if shared.lock().unwrap().paused {
                             bail!("Indexing paused");
                         }
@@ -742,8 +850,10 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                         }
                         let vector = runtime.embed(&part.input)?;
                         shared.lock().unwrap().backend = runtime.backend.clone();
-                        ensure_current(&store, &file, &latest, &content)?;
-                        store.checkpoint(
+                        current_work.check()?;
+                        ensure_current(&store, &file, &paths.load()?, &content)?;
+                        if !store.checkpoint_for(
+                            &file,
                             &content,
                             &runtime.fingerprint(),
                             index,
@@ -753,7 +863,9 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                                 page: part.page,
                                 seconds: part.seconds,
                             },
-                        )?;
+                        )? {
+                            return Err(IndexingInterruption::Changed.into());
+                        }
                         index += 1;
                         if store
                             .next_pending()?
@@ -775,7 +887,10 @@ fn index_loop(paths: &Paths, shared: &Shared, receiver: mpsc::Receiver<Command>)
                 if let Err(e) = result
                     && !paused
                 {
-                    if e.downcast_ref::<IndexingInterruption>().is_some() {
+                    if e.is::<Cancelled>()
+                        || current_work.check().is_err()
+                        || e.downcast_ref::<IndexingInterruption>().is_some()
+                    {
                         continue;
                     }
                     if e.downcast_ref::<crate::inference::InferenceError>()

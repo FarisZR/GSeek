@@ -55,6 +55,18 @@ Auto hardware
 selection retries with another backend if initialization or inference fails; an
 explicit backend reports its failure.
 
+Preference updates merge individual fields against the latest saved settings on
+the service's D-Bus thread. The UI serializes those updates. Replacing settings
+cancels both index and query workers, including blocked local inference requests,
+before another GPU context starts. Runtime downloads and startup report progress.
+The requested and active backends remain separate in status.
+
+Scope changes commit a policy to SQLite and prune files, orphaned content,
+checkpoints, and excluded activity together. Discovery checks that committed
+policy within its insertion transaction. Checkpoints attach to an existing file
+within the same transaction, so an older scan or interrupted worker cannot
+reinsert excluded data. Included duplicate files retain their shared vectors.
+
 External endpoints expose text only. The service requires the configured model
 identifier, finite normalized 768-dimensional vectors, and agreement with the
 reference canary. Redirects are disabled, loopback bypasses proxies, and remote

@@ -25,9 +25,19 @@ struct Asset {
     bytes: u64,
 }
 
+#[cfg(test)]
 pub fn directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
+    directory_with_progress(paths, backend, |_, _, _| Ok(()))
+}
+
+pub fn directory_with_progress(
+    paths: &Paths,
+    backend: Backend,
+    mut progress: impl FnMut(&str, u64, u64) -> Result<()>,
+) -> Result<PathBuf> {
     let name = format!("{backend:?}").to_lowercase();
-    if let Some(dir) = std::env::var_os("GSEEK_RUNTIME_DIR") {
+    progress(&format!("Preparing {}", backend.label()), 0, 0)?;
+    if let Some(dir) = std::env::var_os("GSEEK_RUNTIME_DIR").filter(|s| !s.is_empty()) {
         let dir = PathBuf::from(dir).join(&name);
         if !dir.join("llama-server").is_file() {
             bail!("GSEEK_RUNTIME_DIR has no upstream {name}/llama-server");
@@ -54,7 +64,7 @@ pub fn directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
         .write(true)
         .mode(0o600)
         .open(root.join(format!("{name}.lock")))?;
-    lock.lock()?;
+    model::lock_interruptibly(&lock, || progress("Waiting for runtime installation", 0, 0))?;
     let dest = root.join(format!(
         "{}-{name}-{}",
         manifest.release,
@@ -73,12 +83,23 @@ pub fn directory(paths: &Paths, backend: Backend) -> Result<PathBuf> {
             bail!("Invalid upstream runtime URL");
         }
         let archive = root.join(format!("{}.tar.gz", asset.sha256));
-        model::download_verified(&asset.url, &archive, asset.bytes, &asset.sha256, |_, _| {
-            Ok(())
-        })
+        model::download_verified(
+            &asset.url,
+            &archive,
+            asset.bytes,
+            &asset.sha256,
+            |done, total| {
+                progress(
+                    &format!("Downloading {} runtime", backend.label()),
+                    done,
+                    total,
+                )
+            },
+        )
         .with_context(|| {
             format!("Cannot download the {name} runtime; check your connection and retry setup")
         })?;
+        progress(&format!("Unpacking {} runtime", backend.label()), 0, 0)?;
         let status = Command::new(crate::extract::tool("tar"))
             .arg("-xf")
             .arg(&archive)
