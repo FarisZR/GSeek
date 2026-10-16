@@ -18,6 +18,33 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
+#[ignore = "Uses the system unzip reader and Python's ZIP fixture generator"]
+fn office_documents_use_system_unzip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let settings = Settings {
+        folders: vec![dir.path().into()],
+        ..Default::default()
+    };
+    for (ext, member) in [("docx", "word/document.xml"), ("odt", "content.xml")] {
+        let path = dir.path().join(format!("invoice.{ext}"));
+        checked(Command::new("python3").args(["-c", "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr(sys.argv[2],'<p>Deutsch &amp; العربية</p>'); z.writestr('unrelated.xml','only the document member should be read'); z.close()"])
+            .arg(&path).arg(member))?;
+        let record = gseek::discovery::record_from_uri(
+            url::Url::from_file_path(path).unwrap().as_str(),
+            &settings,
+        )?
+        .unwrap();
+        let mut result = String::new();
+        gseek::extract::read(&record, &settings, dir.path(), |part| {
+            result.push_str(&part.text);
+            Ok(())
+        })?;
+        assert_eq!(result.trim(), "Deutsch & العربية");
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "Uses the native media reader; verifies local playlists cannot initiate network requests"]
 fn media_readers_do_not_follow_network_playlists() -> Result<()> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;

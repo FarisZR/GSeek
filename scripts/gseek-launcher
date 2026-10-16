@@ -4,8 +4,13 @@ self=$(readlink -f "${BASH_SOURCE[0]}")
 bundle=$(cd "$(dirname "$self")/.." && pwd)
 if [[ -f "$bundle/homebrew-prefix" ]]; then
   IFS= read -r brew_prefix < "$bundle/homebrew-prefix"
-  export PATH="$brew_prefix/bin:$PATH"
-  export GSEEK_RUNTIME_LIBRARY_PATH="$brew_prefix/opt/openssl@3/lib"
+  export PATH="$PATH:$brew_prefix/bin"
+fi
+if [[ -f "$bundle/runtime-library-path" ]]; then
+  IFS= read -r runtime_libraries < "$bundle/runtime-library-path" || true
+  if [[ -n "$runtime_libraries" ]]; then
+    export GSEEK_RUNTIME_LIBRARY_PATH="$runtime_libraries"
+  fi
 fi
 export GSEEK_LAUNCHER="$self"
 exec "$bundle/bin/gseek-native" "$@"

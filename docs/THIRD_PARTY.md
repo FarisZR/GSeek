@@ -1,7 +1,7 @@
 # Third-party components
 
 The Rust application is GPL-3.0-or-later. GSeek uses the host GNOME GTK,
-libadwaita, GLib, and TinySPARQL libraries. Media readers are Homebrew dependencies,
+libadwaita, GLib, and TinySPARQL libraries. GSeek invokes existing system media readers,
 with their own licenses and notices.
 
 GSeek downloads unmodified official llama.cpp distributions (MIT), including

@@ -38,7 +38,7 @@ brew trust fariszr/tap
 brew install --cask gseek
 ```
 
-Homebrew installs the app, media readers, desktop entry, background activation,
+Homebrew installs the app, desktop entry, background activation,
 and search provider. It asks for administrator permission to place the small
 provider registration in GNOME’s system data directory.
 
@@ -53,6 +53,30 @@ and overview search running. Update with `brew upgrade --cask gseek`.
 Uninstalling with `brew uninstall --cask gseek` removes desktop integration and
 restores the Files provider’s previous setting. Your local library and settings
 are kept so a reinstall can reuse them.
+
+## System readers
+
+GSeek reuses your desktop’s GTK, libadwaita, LocalSearch, and installed content
+readers. The cask does **not** install Homebrew’s FFmpeg, Poppler, audio stack, or
+codec tree. On a host with OpenSSL 3, it requests **zero Homebrew formulas**.
+Only hosts missing that ABI need the small `openssl@3` compatibility dependency
+for the official inference binary; it is isolated from GNOME’s libraries.
+
+Text files need no additional readers. Setup and Preferences show which other
+formats are available:
+
+| Formats | Existing system programs |
+| --- | --- |
+| PDFs, including scanned pages | `pdfinfo`, `pdftotext`, `pdftoppm` (`poppler-utils`) |
+| Images, audio, video | `ffmpeg`, `ffprobe` |
+| DOCX, ODT | `unzip` |
+
+If you want these formats and the tools are missing, install them through your
+**distribution’s** package manager (`ffmpeg-free` on Fedora, `ffmpeg` on Ubuntu;
+`poppler-utils` and `unzip` on both). Already installed tools are reused. Missing
+readers produce an actionable error for affected files; choose **Retry Failed**
+after installing them. GSeek still requires working embeddings for every search.
+The base system’s `tar` unpacks verified upstream runtimes.
 
 ## Indexing you can control
 

@@ -26,7 +26,14 @@ def render(version, url, arm_sha, intel_sha):
   homepage "https://github.com/FarisZR/GSeek"
 
   depends_on :linux
-  depends_on formula: %w[ffmpeg poppler libarchive openssl@3]
+  # Reuse the host ABI. Fedora's OpenSSL 4-only installations need compatibility libraries.
+  ssl_dirs = ["/usr/lib64", "/lib64", "/usr/lib/#{{arch}}-linux-gnu",
+              "/lib/#{{arch}}-linux-gnu", "/usr/lib", "/lib"]
+  system_ssl3 = ssl_dirs.any? do |dir|
+    File.file?(File.join(dir, "libssl.so.3")) && File.file?(File.join(dir, "libcrypto.so.3"))
+  end
+  depends_on formula: "openssl@3" unless system_ssl3
+  runtime_libraries = system_ssl3 ? "" : "{{{{HOMEBREW_PREFIX}}}}/opt/openssl@3/lib"
 
   artifact "gseek", target: "~/.local/share/gseek-app"
   binary "#{{Dir.home}}/.local/share/gseek-app/bin/gseek", target: "gseek"
@@ -58,6 +65,7 @@ def render(version, url, arm_sha, intel_sha):
                "/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini"],
         sudo: true
     write_file "~/.local/share/gseek-app/homebrew-prefix", "{{{{HOMEBREW_PREFIX}}}}\\n"
+    write_file "~/.local/share/gseek-app/runtime-library-path", "#{{runtime_libraries}}\\n"
     run app_launcher,
         args: ["integrate"],
         env: integration_env,

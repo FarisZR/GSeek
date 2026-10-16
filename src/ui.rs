@@ -78,6 +78,14 @@ fn margins(widget: &impl IsA<gtk::Widget>, value: i32) {
 
 impl Window {
     fn build(app: &adw::Application, paths: Paths) -> Rc<Self> {
+        static RESOURCES: std::sync::Once = std::sync::Once::new();
+        RESOURCES.call_once(|| {
+            gio::resources_register_include!("gseek.gresource")
+                .expect("Valid embedded GTK resources");
+        });
+        let display = gtk::gdk::Display::default().expect("GTK has a display");
+        gtk::IconTheme::for_display(&display).add_resource_path("/io/github/FarisZR/GSeek/icons");
+        gtk::Window::set_default_icon_name(APP_ID);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("GSeek")
@@ -452,6 +460,7 @@ impl Window {
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folders, &draft, false, self);
         content.append(&locations);
+        content.append(&reader_status_group());
         let group = adw::PreferencesGroup::new();
         let replace = adw::SwitchRow::builder()
             .title("Use GSeek in GNOME Search")
@@ -581,6 +590,7 @@ impl Window {
             .build();
         types.add(&extensions);
         page.add(&types);
+        page.add(&reader_status_group());
         let integration_group = adw::PreferencesGroup::builder()
             .title("GNOME Integration")
             .build();
@@ -731,6 +741,21 @@ impl Window {
         });
         dialog.present(Some(&self.window));
     }
+}
+
+fn reader_status_group() -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("File Readers")
+        .description("GSeek uses tools already installed on this computer. Text search needs no extra readers.")
+        .build();
+    for (title, detail) in crate::extract::reader_status() {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(detail)
+            .build();
+        row.set_subtitle_lines(0);
+        group.add(&row);
+    }
+    group
 }
 
 fn clear_list(list: &gtk::ListBox) {
@@ -927,16 +952,39 @@ mod tests {
             .build();
         app.register(gio::Cancellable::NONE).unwrap();
         let ui = Window::build(&app, Paths::from_env());
-        ui.window.present();
-        ui.refresh();
-        until(|| {
-            ui.window.is_mapped()
-                && ui.main_stack.visible_child_name().as_deref() == Some("library")
-        });
+        let theme = gtk::IconTheme::new();
+        theme.set_search_path(&[]);
+        theme.add_resource_path("/io/github/FarisZR/GSeek/icons");
+        assert!(
+            theme.has_icon(APP_ID),
+            "App icon must work with no installed icon theme"
+        );
+        let icon = theme.lookup_icon(
+            APP_ID,
+            &[],
+            128,
+            1,
+            gtk::TextDirection::None,
+            gtk::IconLookupFlags::empty(),
+        );
+        assert!(icon.file().unwrap().uri().starts_with("resource:///"));
+        let texture = gtk::gdk::Texture::from_resource(
+            "/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png",
+        );
+        assert_eq!((texture.width(), texture.height()), (512, 512));
         let output = std::env::var_os("GSEEK_SCREENSHOT_DIR").map(PathBuf::from);
         if let Some(dir) = &output {
             std::fs::create_dir_all(dir).unwrap();
         }
+        ui.window.present();
+        until(|| ui.window.is_mapped());
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("welcome.png"));
+        }
+        ui.refresh();
+        until(|| ui.main_stack.visible_child_name().as_deref() == Some("library"));
         until(|| ui.logs.first_child().is_some());
         // Allow a full frame before recording the native widget scene.
         let frame = Instant::now();

@@ -72,12 +72,18 @@ stable absolute launcher paths under `~/.local/share/gseek-app`.
 Integration tracks checksums and the previous Files/GSeek provider settings.
 Uninstallation removes only unchanged owned files and restores only those settings
 it changed. Index data survives. The launcher uses host GTK/GLib/LocalSearch; it
-does not override those libraries with Homebrew copies. Homebrew provides media
-readers and the upstream runtime’s OpenSSL 3 ABI dependency. The launcher passes
-Homebrew’s OpenSSL directory only to the inference child. All inference backends are downloaded directly from official llama.cpp
-release assets. The embedded `data/runtimes.json` pins release URLs, exact sizes,
+does not override those libraries with Homebrew copies. GSeek reuses
+optional readers from the host, preferring `/usr/bin` over Homebrew. The cask
+only supplies OpenSSL 3 when the host lacks that ABI. Its compatibility path is
+passed to the inference child only when needed. All inference backends are
+downloaded directly from official llama.cpp release assets. The embedded `data/runtimes.json` pins release URLs, exact sizes,
 and checksums for CPU, Vulkan, and CUDA on both architectures. CUDA includes its
 upstream redistributable libraries. GSeek verifies downloads, serializes installation,
 and atomically installs each backend. The app does not compile, patch, or rehost
 inference engines. Private sockets and child-only library paths isolate the
 runtime from the native GNOME process.
+
+The welcome and About icons are embedded PNG resources, independent of icon
+installation, SVG loaders, and stale theme caches. Desktop entries reference an
+owned, installed PNG by absolute path. Icon files participate in the same upgrade
+and uninstall manifest as other desktop registrations.
