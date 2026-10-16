@@ -108,7 +108,7 @@ impl Window {
         root.set_content(Some(&main_stack));
         window.set_content(Some(&root));
 
-        let welcome=adw::StatusPage::builder().icon_name(APP_ID).title("Find your files by what you remember")
+        let welcome=adw::StatusPage::builder().paintable(&gtk::gdk::Texture::from_resource("/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png")).title("Find your files by what you remember")
             .description("Describe a document, photo, or moment in a recording. GSeek brings private, multilingual search to your GNOME overview.").build();
         let welcome_box = vertical(16);
         let privacy = label(

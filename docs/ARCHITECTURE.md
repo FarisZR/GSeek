@@ -83,7 +83,7 @@ and atomically installs each backend. The app does not compile, patch, or rehost
 inference engines. Private sockets and child-only library paths isolate the
 runtime from the native GNOME process.
 
-The welcome and About icons are embedded PNG resources, independent of icon
+The welcome icon loads directly from an embedded PNG resource, independent of icon
 installation, SVG loaders, and stale theme caches. Desktop entries reference an
 owned, installed PNG by absolute path. Icon files participate in the same upgrade
 and uninstall manifest as other desktop registrations.
