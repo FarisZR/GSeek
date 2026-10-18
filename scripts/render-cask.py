@@ -40,7 +40,7 @@ def render(version, url, arm_sha, intel_sha):
 
   # Homebrew replaces HOME and preserves desktop variables as HOMEBREW_*.
   # Give the registration command the actual user's XDG and session paths.
-  integration_env = {{}}
+  integration_env = {{"HOME" => Dir.home}}
   {{"XDG_DATA_HOME" => ".local/share", "XDG_CONFIG_HOME" => ".config",
     "XDG_CACHE_HOME" => ".cache"}}.each do |name, fallback|
     value = ENV["HOMEBREW_#{{name}}"] || ENV[name]
@@ -50,7 +50,8 @@ def render(version, url, arm_sha, intel_sha):
       File.join(Dir.home, fallback)
     end
   end
-  %w[DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR].each do |name|
+  %w[DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR DISPLAY WAYLAND_DISPLAY XAUTHORITY
+     XDG_CURRENT_DESKTOP XDG_SESSION_TYPE].each do |name|
     value = ENV["HOMEBREW_#{{name}}"] || ENV[name]
     integration_env[name] = value if value && !value.empty?
   end

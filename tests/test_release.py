@@ -2,17 +2,29 @@
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSEMBLER = ROOT / "scripts/assemble-release.py"
 
 
 class ReleaseAssembly(unittest.TestCase):
+    def test_every_control_icon_is_shipped_in_the_gtk_resource(self):
+        xml = ET.parse(ROOT / "data/gseek.gresource.xml")
+        files = {node.text for node in xml.findall(".//file")}
+        names = set(re.findall(r'"([a-z][a-z0-9-]*-symbolic)"', (ROOT / "src/ui.rs").read_text()))
+        for name in names:
+            path = f"icons/scalable/actions/{name}.svg"
+            self.assertIn(path, files, f"Control icon {name} must not depend on the desktop theme")
+            image = ET.parse(ROOT / "data" / path).getroot()
+            self.assertEqual(image.tag, "{http://www.w3.org/2000/svg}svg")
+
     def test_native_packages_are_published_unchanged_with_verified_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

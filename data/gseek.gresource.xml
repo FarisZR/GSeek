@@ -2,5 +2,16 @@
 <gresources>
   <gresource prefix="/io/github/FarisZR/GSeek">
     <file>icons/512x512/apps/io.github.FarisZR.GSeek.png</file>
+    <file>icons/scalable/actions/applications-engineering-symbolic.svg</file>
+    <file>icons/scalable/actions/dialog-warning-symbolic.svg</file>
+    <file>icons/scalable/actions/drive-harddisk-symbolic.svg</file>
+    <file>icons/scalable/actions/folder-symbolic.svg</file>
+    <file>icons/scalable/actions/go-jump-symbolic.svg</file>
+    <file>icons/scalable/actions/go-previous-symbolic.svg</file>
+    <file>icons/scalable/actions/list-remove-symbolic.svg</file>
+    <file>icons/scalable/actions/object-select-symbolic.svg</file>
+    <file>icons/scalable/actions/open-menu-symbolic.svg</file>
+    <file>icons/scalable/actions/system-search-symbolic.svg</file>
+    <file>icons/scalable/actions/view-refresh-symbolic.svg</file>
   </gresource>
 </gresources>

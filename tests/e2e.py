@@ -524,6 +524,42 @@ class EndToEnd(unittest.TestCase):
             actions.activate_action("quit", None)
             wait_for(lambda: not running())
 
+    def test_07c_restart_menu_and_install_replace_the_live_window_and_service(self):
+        app_id = "io.github.FarisZR.GSeek"
+        def owner(name):
+            try:
+                return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus", "GetNameOwner", GLib.Variant("(s)", (name,)),
+                    None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+            except GLib.Error:
+                return None
+        def activate(action):
+            self.bus.call_sync(app_id, "/io/github/FarisZR/GSeek", "org.gtk.Actions", "Activate",
+                GLib.Variant("(sava{sv})", (action, [], {})), None, Gio.DBusCallFlags.NONE, 2000, None)
+        def replaced(name, previous):
+            current = owner(name)
+            return current if current and current != previous else None
+        initial_window = subprocess.Popen([BINARY], stdout=self.service_log, stderr=self.service_log)
+        wait_for(lambda: owner(app_id), timeout=10)
+        try:
+            for restart in [lambda: activate("restart"),
+                            lambda: subprocess.run([BINARY, "integrate"], check=True, timeout=40)]:
+                previous_window, previous_service = owner(app_id), owner(BUS)
+                settings = self.invoke("Settings")[0]
+                restart()
+                wait_for(lambda: replaced(app_id, previous_window), timeout=15)
+                wait_for(lambda: replaced(BUS, previous_service), timeout=15)
+                self.assertEqual(self.invoke("Settings")[0], settings)
+                expected_version = subprocess.check_output([BINARY, "--version"], text=True).strip().split()[1]
+                self.assertEqual(self.status()["version"], expected_version)
+                wait_for(lambda: self.status()["ready"], timeout=300)
+                self.assertTrue(self.search("pets lease"))
+        finally:
+            if owner(app_id):
+                activate("quit")
+                wait_for(lambda: not owner(app_id), timeout=10)
+            initial_window.wait(timeout=10)
+
     def test_08_native_gtk_views(self):
         if os.environ.get("GSEEK_GUI_TEST_COMMAND"):
             downloads = ROOT / "Downloads"

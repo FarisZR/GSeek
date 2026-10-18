@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Install, reinstall, and uninstall this exact build through Homebrew's Linux cask lifecycle."""
 import hashlib
+import ast
 import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
+if "GSEEK_BREW_TEST_SESSION" not in os.environ:
+    # Keep the application alive in one desktop session through actual upgrades.
+    os.execvpe("xvfb-run", ["xvfb-run", "-a", "dbus-run-session", "--", sys.executable, __file__],
+              {**os.environ, "GSEEK_BREW_TEST_SESSION": "1"})
 spec = importlib.util.spec_from_file_location("render_cask", ROOT / "scripts/render-cask.py")
 cask = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cask)
@@ -15,6 +22,29 @@ spec.loader.exec_module(cask)
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, **kwargs)
+
+
+def wait_for(predicate):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        result = predicate()
+        if result:
+            return result
+        time.sleep(0.1)
+    raise AssertionError("Timed out waiting for GSeek's desktop lifecycle")
+
+
+def bus_owner(name):
+    reply = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
+        "--object-path", "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.GetNameOwner", name],
+        text=True, capture_output=True)
+    return ast.literal_eval(reply.stdout)[0] if reply.returncode == 0 else None
+
+
+def activate(action):
+    run("gdbus", "call", "--session", "--dest", "io.github.FarisZR.GSeek",
+        "--object-path", "/io/github/FarisZR/GSeek", "--method", "org.gtk.Actions.Activate",
+        action, "[]", "{}")
 
 
 arch = "aarch64" if os.uname().machine == "aarch64" else "x86_64"
@@ -36,9 +66,12 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         run("brew", "install", "--cask", "fariszr/gseek-ci/gseek")
         installed = True
         run("gseek", "--version")
-        gui = subprocess.run(["xvfb-run", "-a", "dbus-run-session", "--", "timeout", "3", "gseek"], text=True, capture_output=True)
-        assert gui.returncode == 124, gui.stderr
-        assert "CRITICAL" not in gui.stderr and "symbol lookup error" not in gui.stderr, gui.stderr
+        gui_log = tap / "gui.log"
+        with gui_log.open("w") as output:
+            initial_window = subprocess.Popen(["gseek"], stdout=output, stderr=output)
+        app_id = "io.github.FarisZR.GSeek"
+        service_id = app_id + ".Service"
+        wait_for(lambda: bus_owner(app_id) and bus_owner(service_id))
         data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
         config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         desktop = data / "applications/io.github.FarisZR.GSeek.desktop"
@@ -52,8 +85,23 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         assert icon.is_absolute() and icon.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         sentinel = data / "gseek/keep-index-data.txt"
         sentinel.write_text("Preserved across upgrades and uninstall")
-        run("brew", "reinstall", "--cask", "fariszr/gseek-ci/gseek")
+        def assert_replaced(operation):
+            previous = {name: bus_owner(name) for name in [app_id, service_id]}
+            operation()
+            for name in previous:
+                wait_for(lambda: bus_owner(name) and bus_owner(name) != previous[name])
+            assert sentinel.read_text() == "Preserved across upgrades and uninstall"
+        cask_file = Path(subprocess.check_output(["brew", "--repo", "fariszr/gseek-ci"], text=True).strip()) / "Casks/gseek.rb"
+        cask_file.write_text(cask.render("0.1.4", archive.as_uri(), digest, digest))
+        assert_replaced(lambda: run("brew", "upgrade", "--cask", "fariszr/gseek-ci/gseek"))
+        initial_window.wait(timeout=10)
+        assert_replaced(lambda: activate("restart"))
+        assert_replaced(lambda: run("brew", "reinstall", "--cask", "fariszr/gseek-ci/gseek"))
         run("gseek", "--version")
+        activate("quit")
+        wait_for(lambda: not bus_owner(app_id))
+        output = gui_log.read_text()
+        assert "CRITICAL" not in output and "symbol lookup error" not in output, output
         run("brew", "uninstall", "--cask", "gseek")
         installed = False
         for path in [desktop, service, provider, autostart, icon]:

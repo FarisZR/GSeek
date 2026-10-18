@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod extract;
 pub mod inference;
 pub mod integration;
+pub mod lifecycle;
 mod local_http;
 mod managed_runtime;
 pub mod model;

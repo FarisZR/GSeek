@@ -110,6 +110,17 @@ The welcome icon loads directly from an embedded PNG resource, independent of ic
 installation, SVG loaders, and stale theme caches. Desktop entries reference an
 owned, installed PNG by absolute path. Icon files participate in the same upgrade
 and uninstall manifest as other desktop registrations.
+The small set of UI symbolics is embedded from Adwaita 51, so controls and activity
+states also work without an installed icon theme. File results keep their native
+GIO icons and thumbnails.
+
+Registration replaces live processes through their session-bus interfaces: it
+asks the window to close, lets pending preference saves finish, waits for the
+captured window/provider owners to release their names, and writes registration.
+Configured installations reactivate the provider through D-Bus and reopen the
+previous window at the stable installed launcher path. `gseek restart` and the
+main menu use the same lifecycle. No process-name matching or inference fallback
+is involved. Status includes the running provider version for diagnostics.
 
 ## Native setup
 
