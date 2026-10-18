@@ -42,6 +42,9 @@ semantic cosine similarity contribute to ranking. Weak semantic neighbors are
 filtered relative to the best match. Results are deduplicated by file. The service
 bounds its queue and drops stale requests separately for Shell and diagnostic clients; it
 returns a complete result set rather than continuously inserting reordered rows.
+Semantic candidates keep one best chunk per file in a bounded score-ordered set,
+so updates and evictions take logarithmic time even for 5,000 requested results.
+Filename merging uses a URI map. Selected paths are revalidated before returning.
 Vector scans stream from SQLite with a bounded page cache instead of loading the
 entire collection. This favors a minimal dependency tree; ANN is a future option
 if measured library sizes require it.
@@ -133,3 +136,8 @@ results survive the same exclusion policy.
 Default exclusion constants are shared by validation and visible preferences.
 Backend labels come from the selected device and offload report in that worker’s
 upstream startup log; software Vulkan devices are identified as CPU execution.
+
+Results queries use a registered GApplication string option so literal hyphen-prefixed
+queries survive both command-line parsers. File eligibility checks and activation run
+off the GTK and service main loops. Saving preferences clears stale results and
+repeats the current query when the updated backend is ready.

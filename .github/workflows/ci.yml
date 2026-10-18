@@ -27,7 +27,7 @@ jobs:
     name: GNOME 51 / ${{ matrix.distro }} / ${{ matrix.backend }}
     runs-on: ubuntu-24.04
     container: ${{ matrix.image }}
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

@@ -118,7 +118,8 @@ are excluded. GSeek does not crawl your home directory independently of GNOME.
 Select GSeek’s **Show All Results** action in Activities to open a native results
 view with the same query. It shows content matches and standard GNOME filename
 matches together. Search again with the search field or **Ctrl+F**, and open a
-file by activating its row. The window is reused when another query arrives from
+file by activating its row. Folder and exclusion changes refresh an open results
+view automatically. The window is reused when another query arrives from
 Activities. Large result sets use a virtualized list; searches return up to 5,000
 matches and ask you to refine the query if that limit is reached.
 

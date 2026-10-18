@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -72,6 +72,77 @@ pub struct StoredChunk {
 
 pub struct Store {
     conn: Connection,
+}
+
+// Keep one best chunk per file and an ordered, bounded set of its scores.
+// Updating or evicting a candidate is logarithmic, including for large result views.
+#[derive(Clone, Debug)]
+struct Rank {
+    score: f64,
+    uri: String,
+}
+impl PartialEq for Rank {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for Rank {}
+impl PartialOrd for Rank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Rank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // The worst score sorts first; a later URI loses equal-score ties.
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.uri.cmp(&self.uri))
+    }
+}
+struct SemanticCandidates {
+    hits: HashMap<String, SearchHit>,
+    order: BTreeSet<Rank>,
+    limit: usize,
+}
+impl SemanticCandidates {
+    fn new(limit: usize) -> Self {
+        Self {
+            hits: HashMap::new(),
+            order: BTreeSet::new(),
+            limit,
+        }
+    }
+    fn accepts(&self, uri: &str, score: f64) -> bool {
+        if let Some(old) = self.hits.get(uri) {
+            return score > old.score;
+        }
+        if self.hits.len() < self.limit {
+            return true;
+        }
+        self.order.first().is_some_and(|worst| {
+            score > worst.score || (score == worst.score && uri < worst.uri.as_str())
+        })
+    }
+    fn insert(&mut self, hit: SearchHit) {
+        if !self.accepts(&hit.uri, hit.score) {
+            return;
+        }
+        if let Some(old) = self.hits.remove(&hit.uri) {
+            self.order.remove(&Rank {
+                score: old.score,
+                uri: old.uri,
+            });
+        } else if self.hits.len() == self.limit {
+            let worst = self.order.pop_first().unwrap();
+            self.hits.remove(&worst.uri);
+        }
+        self.order.insert(Rank {
+            score: hit.score,
+            uri: hit.uri.clone(),
+        });
+        self.hits.insert(hit.uri.clone(), hit);
+    }
 }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -583,6 +654,7 @@ impl Store {
             keep_hit(&mut hits, h, settings);
         }
         {
+            let mut semantic = SemanticCandidates::new(limit);
             let v = vector;
             // Stream vectors from SQLite's bounded page cache; never materialize the vector database in memory.
             let mut stmt = self.conn.prepare("SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds,c.vector FROM chunks c
@@ -604,37 +676,33 @@ impl Store {
                     continue;
                 }
                 let path: String = r.get(1)?;
-                if settings.allows(Path::new(&path)) {
-                    best_semantic = best_semantic.max(score);
-                }
-                if hits.len() >= limit * 4
-                    && !hits.contains_key(&r.get::<_, String>(0)?)
-                    && let Some((_, lowest)) =
-                        hits.iter().min_by(|a, b| a.1.score.total_cmp(&b.1.score))
-                    && score <= lowest.score
-                {
+                if !settings.allows(Path::new(&path)) {
                     continue;
                 }
-                keep_hit(
-                    &mut hits,
-                    hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, score)?,
-                    settings,
-                );
-                if hits.len() > limit * 4 {
-                    let lowest = hits
-                        .iter()
-                        .min_by(|a, b| a.1.score.total_cmp(&b.1.score))
-                        .map(|(k, _)| k.clone())
-                        .unwrap();
-                    hits.remove(&lowest);
+                let uri: String = r.get(0)?;
+                if hits.contains_key(&uri) {
+                    best_semantic = best_semantic.max(score);
+                    continue;
                 }
+                if !semantic.accepts(&uri, score) {
+                    continue;
+                }
+                let hit = hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, score)?;
+                if !semantic.hits.contains_key(&uri) && !search_path_allowed(&hit.path, settings) {
+                    continue;
+                }
+                best_semantic = best_semantic.max(score);
+                semantic.insert(hit);
             }
+            hits.extend(semantic.hits);
         }
         let mut hits: Vec<_> = hits.into_values().collect();
         // EmbeddingGemma's unrelated document pairs can still have positive cosine scores.
         // Preserve lexical hits, but omit weak semantic neighbours rather than filling the view.
         let cutoff = (best_semantic - 0.12).max(0.60);
-        hits.retain(|h| h.score >= 2.0 || h.score >= cutoff);
+        hits.retain(|h| {
+            (h.score >= 2.0 || h.score >= cutoff) && search_path_allowed(&h.path, settings)
+        });
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
         hits.truncate(limit);
         Ok(hits)
@@ -667,43 +735,46 @@ pub fn merge_filename_matches(
     limit: usize,
 ) {
     let query = folded(query.trim());
+    let mut by_uri: HashMap<_, _> = hits.drain(..).map(|hit| (hit.uri.clone(), hit)).collect();
     for file in files {
-        if hits.iter().any(|hit| hit.uri == file.uri) {
-            continue;
-        }
         let score = if folded(&file.name) == query {
             5.0
         } else {
             3.0
         };
-        hits.push(SearchHit {
-            uri: file.uri,
-            path: file.path,
-            name: file.name,
-            mime: file.mime,
-            snippet: String::new(),
-            page: None,
-            seconds: None,
-            score,
-        });
+        if let Some(hit) = by_uri.get_mut(&file.uri) {
+            hit.score = hit.score.max(score);
+            continue;
+        }
+        by_uri.insert(
+            file.uri.clone(),
+            SearchHit {
+                uri: file.uri,
+                path: file.path,
+                name: file.name,
+                mime: file.mime,
+                snippet: String::new(),
+                page: None,
+                seconds: None,
+                score,
+            },
+        );
     }
+    hits.extend(by_uri.into_values());
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
     hits.truncate(limit.clamp(1, MAX_RESULTS));
 }
 fn keep_hit(hits: &mut HashMap<String, SearchHit>, h: SearchHit, settings: &Settings) {
-    if !settings.allows(&h.path) || !h.path.exists() {
+    if hits.get(&h.uri).is_some_and(|old| old.score >= h.score)
+        || !search_path_allowed(&h.path, settings)
+    {
         return;
     }
-    // A symlink must not turn an approved folder into access outside the user's scope.
-    if std::fs::canonicalize(&h.path).is_ok_and(|p| !settings.allows(&p)) {
-        return;
-    }
-    match hits.get(&h.uri) {
-        Some(old) if old.score >= h.score => (),
-        _ => {
-            hits.insert(h.uri.clone(), h);
-        }
-    }
+    hits.insert(h.uri.clone(), h);
+}
+fn search_path_allowed(path: &Path, settings: &Settings) -> bool {
+    // A symlink must not turn an approved folder into access outside its scope.
+    settings.allows(path) && std::fs::canonicalize(path).is_ok_and(|p| settings.allows(&p))
 }
 
 pub fn validate_vector(v: &[f32]) -> Result<()> {
@@ -908,6 +979,51 @@ mod tests {
         store.activate_pipeline("new")?;
         assert_eq!(store.counts()?.pending, 1);
         assert!(store.file(&f.uri)?.is_some());
+        Ok(())
+    }
+    #[test]
+    fn large_semantic_result_sets_keep_all_requested_files_and_their_best_chunk() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let vector = query_vector();
+        let mut weaker = vector.clone();
+        weaker[0] = 0.95;
+        weaker[1] = (1.0_f32 - 0.95_f32.powi(2)).sqrt();
+        store.save_content(
+            "shared",
+            "p",
+            &[
+                StoredChunk {
+                    text: "first chunk".into(),
+                    vector: Some(weaker),
+                    page: Some(1),
+                    seconds: None,
+                },
+                StoredChunk {
+                    text: "best chunk".into(),
+                    vector: Some(vector.clone()),
+                    page: Some(2),
+                    seconds: None,
+                },
+            ],
+        )?;
+        for i in (0..1000).rev() {
+            let mut file = template.clone();
+            file.name = format!("Entry {i:04}.txt");
+            file.path = dir.path().join(&file.name);
+            std::fs::write(&file.path, "content")?;
+            file.uri = url::Url::from_file_path(&file.path).unwrap().into();
+            file.source_id = i + 2;
+            store.discover(&file, 1)?;
+            store.complete(&file.uri, "shared")?;
+        }
+        let hits = store.search("concept", &vector, "p", &settings, 900)?;
+        assert_eq!(hits.len(), 900);
+        assert_eq!(hits.first().unwrap().name, "Entry 0000.txt");
+        assert_eq!(hits.last().unwrap().name, "Entry 0899.txt");
+        assert!(
+            hits.iter()
+                .all(|hit| hit.page == Some(2) && hit.score > 0.999)
+        );
         Ok(())
     }
     #[test]
