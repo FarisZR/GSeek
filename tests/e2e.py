@@ -284,7 +284,9 @@ class EndToEnd(unittest.TestCase):
                 row = db.execute("SELECT state FROM files WHERE uri=?", (dense.as_uri(),)).fetchone()
                 return row and row[0] == "indexed"
         try:
-            wait_for(indexed)
+            # This file requires two bounded embedding calls. The software Vulkan
+            # driver can legitimately need most of the per-call inference timeout.
+            wait_for(indexed, timeout=600 if os.environ.get("GSEEK_TEST_BACKEND") == "vulkan" else 90)
             self.assertTrue(self.status()["ready"])
             self.assertEqual(self.search("Dense Input.txt")[0]["uri"], dense.as_uri())
         finally:
@@ -515,6 +517,9 @@ class EndToEnd(unittest.TestCase):
             wait_for(lambda: query() == "Rental Agreement")
             self.invoke("LaunchSearch", GLib.Variant("(asu)", (["Tomato", "Soup"], 0)), SHELL_IFACE, PROVIDER)
             wait_for(lambda: query() == "Tomato Soup")
+            for literal in ["-report", "--help", "--"]:
+                self.invoke("LaunchSearch", GLib.Variant("(asu)", ([literal], 0)), SHELL_IFACE, PROVIDER)
+                wait_for(lambda: query() == literal)
         finally:
             actions.activate_action("quit", None)
             wait_for(lambda: not running())
@@ -527,10 +532,20 @@ class EndToEnd(unittest.TestCase):
             for path in files:
                 path.write_text("Only the filename should be searched.")
                 self.add(path)
+            slow_open_seen = threading.Event()
+            def slow_open_query(_connection, message, incoming, _data):
+                body = message.get_body()
+                if incoming and message.get_member() == "Query" and body and "?url = " in str(body) and "Show%20All%20Results%200.txt" in str(body):
+                    slow_open_seen.set()
+                    time.sleep(1.2)
+                return message
+            filter_id = self.bus.add_filter(slow_open_query, None)
             try:
                 wait_for(lambda: len([hit for hit in self.search("Show All Results") if hit["name"].startswith("Show All Results")]) == 7)
                 subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
+                self.assertTrue(slow_open_seen.is_set(), "The native file opener must exercise the delayed filename lookup")
             finally:
+                self.bus.remove_filter(filter_id)
                 for path in files:
                     self.remove(path)
                     path.unlink()

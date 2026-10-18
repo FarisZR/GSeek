@@ -22,6 +22,7 @@ struct Window {
     search_placeholder: adw::StatusPage,
     search_status: gtk::Label,
     search_generation: Cell<u64>,
+    search_refresh_pending: Cell<bool>,
     banner: adw::Banner,
     status_title: gtk::Label,
     status_detail: gtk::Label,
@@ -50,6 +51,14 @@ pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
+    app.add_main_option(
+        "query",
+        0u8.into(),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Show matching files",
+        Some("TEXT"),
+    );
     let current: Rc<RefCell<Option<Rc<Window>>>> = Rc::new(RefCell::new(None));
     let state = current.clone();
     let app_paths = paths.clone();
@@ -106,15 +115,15 @@ pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
     app.add_action(&quit);
     app.set_accels_for_action("app.quit", &["<Primary>q", "<Primary>w"]);
     app.connect_command_line(|app, command| {
-        if let Some(query) = command.arguments().get(1) {
-            app.activate_action("search", Some(&query.to_string_lossy().to_variant()));
+        if let Ok(Some(query)) = command.options_dict().lookup::<String>("query") {
+            app.activate_action("search", Some(&query.to_variant()));
         } else {
             app.activate();
         }
         glib::ExitCode::SUCCESS
     });
     let arguments = std::iter::once("gseek".to_owned())
-        .chain(query)
+        .chain(query.map(|query| format!("--query={query}")))
         .collect::<Vec<_>>();
     let exit = app.run_with_args(&arguments);
     if exit != glib::ExitCode::SUCCESS {
@@ -360,6 +369,7 @@ impl Window {
             search_placeholder,
             search_status,
             search_generation: Cell::new(0),
+            search_refresh_pending: Cell::new(false),
             banner,
             status_title,
             status_detail,
@@ -382,10 +392,17 @@ impl Window {
                 && let Some(item) = ui.search_results.item(position)
             {
                 let object = item.downcast::<glib::BoxedAnyObject>().unwrap();
-                let hit = object.borrow::<crate::store::SearchHit>();
-                if let Err(e) = integration::open_result(&ui.paths, &hit.uri) {
-                    ui.error(&format!("{e:#}"));
-                }
+                let uri = object.borrow::<crate::store::SearchHit>().uri.clone();
+                let paths = ui.paths.clone();
+                let weak = Rc::downgrade(&ui);
+                spawn(
+                    move || integration::open_result(&paths, &uri),
+                    move |result| {
+                        if let (Err(e), Some(ui)) = (result, weak.upgrade()) {
+                            ui.error(&format!("{e:#}"));
+                        }
+                    },
+                );
             }
         });
         let weak = Rc::downgrade(&ui);
@@ -642,6 +659,24 @@ impl Window {
                         } else {
                             "Pause Indexing"
                         });
+                        if ui.search_refresh_pending.get()
+                            && ui.main_stack.visible_child_name().as_deref() == Some("results")
+                        {
+                            if s.ready
+                                && !ui.saving_settings.get()
+                                && ui.settings_queue.borrow().is_empty()
+                            {
+                                ui.search_refresh_pending.set(false);
+                                ui.search_files();
+                            } else if !s.ready {
+                                ui.search_placeholder.set_title(if s.state == "error" {
+                                    "Search Unavailable"
+                                } else {
+                                    "Updating Search"
+                                });
+                                ui.search_placeholder.set_description(Some(&s.detail));
+                            }
+                        }
                     }
                     Err(e) => {
                         ui.banner.set_revealed(true);
@@ -751,6 +786,15 @@ impl Window {
                     ui.saving_settings.set(false);
                     if let Err(error) = result {
                         ui.error(&format!("Could not save preference: {error:#}"));
+                    } else if ui.main_stack.visible_child_name().as_deref() == Some("results") {
+                        ui.search_refresh_pending.set(true);
+                        ui.search_generation
+                            .set(ui.search_generation.get().wrapping_add(1));
+                        ui.search_results.remove_all();
+                        ui.search_content.set_visible_child_name("empty");
+                        ui.search_placeholder.set_title("Updating Search");
+                        ui.search_placeholder
+                            .set_description(Some("Applying preferences"));
                     }
                     ui.refresh();
                     ui.save_next();
@@ -1408,6 +1452,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    fn results_list(widget: &gtk::Widget) -> Option<gtk::ListView> {
+        if let Some(list) = widget.downcast_ref::<gtk::ListView>() {
+            return Some(list.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(list) = results_list(&widget) {
+                return Some(list);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
     fn capture(window: &adw::ApplicationWindow, path: &Path) {
         let paintable = gtk::WidgetPaintable::new(Some(window));
         let mut node = None;
@@ -1548,6 +1605,41 @@ mod tests {
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("results.png"));
         }
+        let opened =
+            PathBuf::from(std::env::var_os("GSEEK_TEST_ROOT").unwrap()).join("opened.json");
+        let _ = std::fs::remove_file(&opened);
+        let target = ui
+            .search_results
+            .item(0)
+            .unwrap()
+            .downcast::<glib::BoxedAnyObject>()
+            .unwrap()
+            .borrow::<crate::store::SearchHit>()
+            .uri
+            .clone();
+        let started = Instant::now();
+        results_list(ui.window.upcast_ref())
+            .unwrap()
+            .emit_by_name::<()>("activate", &[&0_u32]);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "File validation blocked GTK"
+        );
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(250));
+        assert!(
+            frame.elapsed() < Duration::from_secs(1),
+            "GTK stopped dispatching while opening a file"
+        );
+        until(|| opened.exists());
+        let arguments: Vec<String> =
+            serde_json::from_slice(&std::fs::read(opened).unwrap()).unwrap();
+        let expected = gio::File::for_uri(&target);
+        assert!(
+            arguments
+                .iter()
+                .any(|arg| gio::File::for_commandline_arg(arg).equal(&expected))
+        );
         ui.show_results("Rental Agreement");
         until(|| ui.search_results.n_items() > 0 && ui.search_generation.get() > 1);
         let item = ui
@@ -1560,6 +1652,50 @@ mod tests {
             item.borrow::<crate::store::SearchHit>().name,
             "Rental Agreement.txt"
         );
+        if ui.paths.load().unwrap().backend == Backend::Cpu {
+            ui.show_results("Show All Results");
+            until(|| ui.search_results.n_items() >= 7);
+            let previous = ui.paths.load().unwrap().excluded_folders;
+            let mut excluded = previous.clone();
+            let downloads = std::path::PathBuf::from(std::env::var_os("GSEEK_TEST_ROOT").unwrap())
+                .join("Downloads");
+            excluded.push(downloads);
+            let weak = Rc::downgrade(&ui);
+            let timer = glib::timeout_add_local(Duration::from_millis(100), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.refresh();
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                }
+            });
+            let generation = ui.search_generation.get();
+            ui.save_preference(serde_json::json!({"excluded_folders":excluded}));
+            until(|| {
+                !ui.saving_settings.get()
+                    && !ui.search_refresh_pending.get()
+                    && ui.search_generation.get() > generation
+                    && (ui.search_results.n_items() > 0
+                        || ui.search_placeholder.title() == "No Results")
+            });
+            assert!((0..ui.search_results.n_items()).all(|i| {
+                !ui.search_results
+                    .item(i)
+                    .unwrap()
+                    .downcast::<glib::BoxedAnyObject>()
+                    .unwrap()
+                    .borrow::<crate::store::SearchHit>()
+                    .name
+                    .starts_with("Show All Results")
+            }));
+            ui.save_preference(serde_json::json!({"excluded_folders":previous}));
+            until(|| {
+                ui.search_results.n_items() >= 7
+                    && !ui.saving_settings.get()
+                    && !ui.search_refresh_pending.get()
+            });
+            timer.remove();
+        }
         ui.show_results("");
         until(|| ui.search_results.n_items() == 0);
         ui.setup();

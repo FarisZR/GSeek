@@ -221,8 +221,25 @@ pub fn run(paths: Paths) -> Result<()> {
                                 let (uri, _, _) = parameters
                                     .get::<(String, Vec<String>, u32)>()
                                     .context("Invalid result")?;
-                                integration::open_result(&spaths, &uri)?;
-                                invocation.return_value(None);
+                                let paths = spaths.clone();
+                                let (sender, receiver) = async_channel::bounded(1);
+                                std::thread::spawn(move || {
+                                    let _ = sender.send_blocking(
+                                        integration::open_result(&paths, &uri)
+                                            .map_err(|e| format!("{e:#}")),
+                                    );
+                                });
+                                glib::spawn_future_local(async move {
+                                    match receiver.recv().await {
+                                        Ok(Ok(())) => invocation.return_value(None),
+                                        Ok(Err(e)) => invocation
+                                            .return_dbus_error("io.github.FarisZR.GSeek.Error", &e),
+                                        Err(_) => invocation.return_dbus_error(
+                                            "io.github.FarisZR.GSeek.Error",
+                                            "File opener stopped",
+                                        ),
+                                    }
+                                });
                             }
                             "LaunchSearch" => {
                                 let (terms, _) = parameters
@@ -231,6 +248,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                 let launcher = launcher()?;
                                 std::process::Command::new(launcher)
                                     .arg("results")
+                                    .arg("--")
                                     .arg(terms.join(" "))
                                     .spawn()?;
                                 invocation.return_value(None);
