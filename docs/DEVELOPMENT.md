@@ -1,5 +1,14 @@
 # Development
 
+Pull requests always run builds, lint, unit/release contracts, and the live
+Homebrew upgrade/restart/reinstall checks on both architectures. Search and UI
+code changes also run the CPU D-Bus/GTK integration suite on Fedora and Ubuntu.
+The long software Vulkan matrix, embedding stress tests, and official runtime
+distribution checks run only for inference/runtime/model/input-reader changes
+or changes to their Rust dependencies. App version bumps and GTK dependency
+updates do not trigger Vulkan. `scripts/ci-scope.py` defines this boundary and
+has regression tests. A manual CI dispatch runs the full suite.
+
 Use a recent Linux GNOME desktop, Rust 1.99.0 (pinned in `rust-toolchain.toml`),
 GTK4/libadwaita and GLib development tools, TinySPARQL, and system media readers.
 On Fedora 45 or Ubuntu 26.10, `scripts/ci-deps.sh` records the distribution packages

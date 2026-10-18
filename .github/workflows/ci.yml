@@ -14,6 +14,20 @@ env:
   GSETTINGS_BACKEND: memory
 
 jobs:
+  scope:
+    name: Select inference checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      inference: ${{ steps.scope.outputs.inference }}
+      search: ${{ steps.scope.outputs.search }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: scope
+        run: python3 scripts/ci-scope.py
   packaging:
     name: Release contracts
     runs-on: ubuntu-24.04
@@ -24,18 +38,30 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   native:
-    name: GNOME 51 / ${{ matrix.distro }} / ${{ matrix.backend }}
+    needs: scope
+    name: GNOME 51 / ${{ matrix.platform.distro }} / ${{ matrix.backend }}
     runs-on: ubuntu-24.04
-    container: ${{ matrix.image }}
+    container: ${{ matrix.platform.image }}
     timeout-minutes: 45
+    env:
+      GSK_RENDERER: cairo
+      GSEEK_TEST_SHELL: '1'
+      GSEEK_TEST_BACKEND: ${{ matrix.backend }}
+      GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
+      GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
+      GSEEK_GUI_TEST_COMMAND: cargo test --lib ui::tests::native_views -- --ignored --test-threads=1
+      XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
+      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
+      XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
+      GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
+      GSEEK_INFERENCE_TIMEOUT: '300'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { distro: ubuntu-26.10, image: 'ubuntu:26.10', backend: cpu }
-          - { distro: ubuntu-26.10, image: 'ubuntu:26.10', backend: vulkan }
-          - { distro: fedora-45, image: 'fedora:45', backend: cpu }
-          - { distro: fedora-45, image: 'fedora:45', backend: vulkan }
+        platform:
+          - { distro: ubuntu-26.10, image: 'ubuntu:26.10' }
+          - { distro: fedora-45, image: 'fedora:45' }
+        backend: ${{ fromJSON(needs.scope.outputs.inference == 'true' && '["cpu","vulkan"]' || '["cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,9 +83,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            .ci-data/gseek
-          key: native-${{ matrix.distro }}-${{ matrix.backend }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
-          restore-keys: native-${{ matrix.distro }}-${{ matrix.backend }}-
+            ${{ needs.scope.outputs.search == 'true' && '.ci-data/gseek' || '' }}
+          key: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && matrix.backend || 'build' }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
+          restore-keys: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && matrix.backend || 'build' }}-
       - name: Check formatting and lint
         run: |
           cargo fmt --check
@@ -69,21 +95,9 @@ jobs:
           cargo test --locked --all-targets
           cargo test --locked --no-default-features --lib
           cargo build --locked
-      - name: Test real embeddings, readers, D-Bus, and GTK
+      - name: Prepare integration fixture
+        if: needs.scope.outputs.search == 'true'
         shell: bash
-        env:
-          GSK_RENDERER: cairo
-          GSETTINGS_BACKEND: keyfile
-          GSEEK_TEST_SHELL: '1'
-          GSEEK_TEST_BACKEND: ${{ matrix.backend }}
-          GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
-          GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
-          GSEEK_GUI_TEST_COMMAND: cargo test --lib ui::tests::native_views -- --ignored --test-threads=1
-          XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
-          XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
-          XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
-          GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
-          GSEEK_INFERENCE_TIMEOUT: '300'
         run: |
           set -euo pipefail
           mkdir -p "$XDG_CONFIG_HOME/gseek" artifacts
@@ -91,20 +105,34 @@ jobs:
           if [[ '${{ matrix.backend }}' == vulkan ]]; then
             export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
             vulkaninfo --summary
+            echo "VK_DRIVER_FILES=$VK_DRIVER_FILES" >> "$GITHUB_ENV"
           fi
+      - name: Test real embeddings and backend recovery
+        if: needs.scope.outputs.inference == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --test real_inference -- --ignored --test-threads=1 2>&1 | tee artifacts/inference.log
           cargo test --locked --lib inference::tests::worker_restarts_after_process_failure -- --ignored --test-threads=1 2>&1 | tee artifacts/recovery.log
+      - name: Test search, D-Bus, and native GTK
+        if: needs.scope.outputs.search == 'true'
+        env:
+          GSETTINGS_BACKEND: keyfile
+        shell: bash
+        run: |
+          set -euo pipefail
           xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/e2e.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: evidence-${{ matrix.distro }}-${{ matrix.backend }}
+          name: evidence-${{ matrix.platform.distro }}-${{ matrix.backend }}
           path: |
             artifacts/
             gnome-version.txt
           if-no-files-found: warn
 
   homebrew:
+    needs: scope
     name: Homebrew lifecycle / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -132,8 +160,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            .runtime-data/gseek/runtimes
-          key: brew-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
+            ${{ needs.scope.outputs.inference == 'true' && '.runtime-data/gseek/runtimes' || '' }}
+          key: brew-${{ runner.arch }}-${{ needs.scope.outputs.inference == 'true' && 'runtime' || 'build' }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
       - name: Build the native application and test its cask
         shell: bash
         run: |
@@ -142,6 +170,7 @@ jobs:
           bash scripts/package.sh
           python3 scripts/test-homebrew.py
       - name: Verify upstream runtime installation for all three backends
+        if: needs.scope.outputs.inference == 'true'
         env:
           XDG_DATA_HOME: ${{ github.workspace }}/.runtime-data
         run: cargo test --locked --lib managed_runtime::tests::official_runtime_distributions_install_and_link -- --ignored --nocapture
