@@ -288,13 +288,17 @@ pub fn record_for_search(uri: &str, settings: &Settings) -> Result<Option<FileRe
 
 /// Read GNOME's filename index directly. These records never enter GSeek's
 /// embedding queue, vector database, or content readers.
-pub fn filename_matches(query: &str, settings: &Settings) -> Result<Vec<FileRecord>> {
-    let terms: Vec<_> = query.split_whitespace().take(32).collect();
+pub fn filename_matches(query: &str, settings: &Settings, limit: usize) -> Result<Vec<FileRecord>> {
+    let terms: Vec<_> = query
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .take(32)
+        .collect();
     if terms.is_empty() {
         return Ok(vec![]);
     }
     let filter = terms
-        .into_iter()
+        .iter()
         .map(|t| {
             format!(
                 "CONTAINS(LCASE(nfo:fileName(?f)), LCASE({}))",
@@ -303,7 +307,20 @@ pub fn filename_matches(query: &str, settings: &Settings) -> Result<Vec<FileReco
         })
         .collect::<Vec<_>>()
         .join(" && ");
-    filename_records(&filter, settings)
+    // TinySPARQL uses whitespace to AND prefix terms. Restrict each term to
+    // alphanumeric text so FTS operators and punctuation stay out of its grammar.
+    let pattern = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .take(32)
+        .map(|s| format!("{s}*"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if pattern.is_empty() {
+        return Ok(vec![]);
+    }
+
+    filename_records(Some(&pattern), &filter, settings, limit)
 }
 
 pub fn indexed_search_record(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {
@@ -311,24 +328,45 @@ pub fn indexed_search_record(uri: &str, settings: &Settings) -> Result<Option<Fi
         return Ok(None);
     }
     Ok(
-        filename_records(&format!("?url = {}", sparql_string(uri)), settings)?
+        filename_records(None, &format!("?url = {}", sparql_string(uri)), settings, 1)?
             .into_iter()
             .next(),
     )
 }
 
-fn filename_records(filter: &str, settings: &Settings) -> Result<Vec<FileRecord>> {
+fn filename_records(
+    pattern: Option<&str>,
+    filter: &str,
+    settings: &Settings,
+    limit: usize,
+) -> Result<Vec<FileRecord>> {
     let api = Api::load()?;
     let connection = connect(api)?;
-    let query = format!(
-        "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
+    let candidate = pattern
+        .map(|p| format!("?f fts:match {} .", sparql_string(p)))
+        .unwrap_or_default();
+    let mut after = String::new();
+    let mut eligible = vec![];
+    loop {
+        let query = format!(
+            "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
+        PREFIX fts: <http://tracker.api.gnome.org/ontology/v3/fts#>
         PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
         PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
         SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
-        GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
-        FILTER ({filter}) }} ORDER BY ?url LIMIT 500"
-    );
-    Ok(read_query(api, &connection, &query, settings, false)?.0)
+        GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url . {candidate} }}
+        FILTER ({filter}) FILTER (STR(?url) > {}) }} ORDER BY ?url LIMIT 256",
+            sparql_string(&after)
+        );
+        let (records, last, read) = read_query(api, &connection, &query, settings, false)?;
+        eligible.extend(records);
+        if read < 256 || eligible.len() >= limit {
+            break;
+        }
+        after = last;
+    }
+    eligible.truncate(limit);
+    Ok(eligible)
 }
 
 fn record_checked(uri: &str, allowed: impl Fn(&Path) -> bool) -> Result<Option<FileRecord>> {

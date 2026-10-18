@@ -113,6 +113,34 @@ Defaults focus on your XDG document and media folders. Hidden directories,
 credentials, caches, dependency directories, container storage, and build outputs
 are excluded. GSeek does not crawl your home directory independently of GNOME.
 
+## Search Results
+
+Select GSeek’s **Show All Results** action in Activities to open a native results
+view with the same query. It shows content matches and standard GNOME filename
+matches together. Search again with the search field or **Ctrl+F**, and open a
+file by activating its row. The window is reused when another query arrives from
+Activities. Large result sets use a virtualized list; searches return up to 5,000
+matches and ask you to refine the query if that limit is reached.
+
+<p align="center"><img src="docs/screenshots/results.png" width="640" alt="Native GSeek results showing seven filename matches from Downloads."></p>
+
+## Default Exclusions
+
+Setup and Preferences show **Default Exclusions**, including the full extension
+list. These defaults apply to content embedding and GNOME filename results.
+Additional excluded folders and extensions can be set in Preferences.
+
+| Excluded by default | Names or extensions |
+| --- | --- |
+| Hidden files and folders | Any name beginning with `.`, including `.env`, `.ssh`, and `.git` |
+| Encryption, keys, certificates, and password databases | `.key`, `.pem`, `.p12`, `.pfx`, `.kdbx`, `.gpg`, `.pgp`, `.asc`, `.age`, `.keystore`, `.jks`, `.kdb`, `.der`, `.crt`, `.cer`, `.psafe3`, `.ibak` |
+| Credential filenames | `credentials`, `credentials.json`, `secrets.json`, `passwords.txt`, `id_rsa`, `id_ed25519`, `id_dsa`, `id_ecdsa`, `authorized_keys`, `known_hosts` |
+| Generated folders | `node_modules`, `target`, `build`, `dist`, `vendor`, `venv`, `__pycache__`, `containers`, `lost+found` |
+
+Downloads is excluded from **new setups’ content folders**, so it is not embedded
+by default. Files there still appear by name when GNOME indexes them. Existing
+folder choices are preserved during upgrades.
+
 ## Hardware
 
 | Backend | Availability |
@@ -129,6 +157,12 @@ GSeek downloads unmodified, version-pinned [official llama.cpp binaries](https:/
 and verifies their sizes and SHA-256 checksums. It builds no inference engine or
 GPU SDK. CPU and real software-Vulkan inference run in CI; physical GPU
 performance and driver compatibility still need testing on representative machines.
+
+Activity and Inference preferences show the device reported by the running
+runtime, for example **Vulkan · GPU · AMD Radeon 780M** or
+**Vulkan · Software CPU · llvmpipe**. If memory fitting offloads no model layers,
+the status says **CPU · no GPU layers**. An unreported device is labeled explicitly
+instead of assuming GPU acceleration.
 
 ## Private by default
 

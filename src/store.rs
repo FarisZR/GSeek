@@ -10,6 +10,7 @@ use std::{
 use unicode_normalization::UnicodeNormalization;
 
 pub const DIMENSIONS: usize = 768;
+pub const MAX_RESULTS: usize = 5000;
 pub fn folded(s: &str) -> String {
     s.nfkc().flat_map(char::to_lowercase).collect()
 }
@@ -536,7 +537,7 @@ impl Store {
             return Ok(vec![]);
         }
         validate_vector(vector)?;
-        let limit = limit.clamp(1, 200);
+        let limit = limit.clamp(1, MAX_RESULTS);
         let mut hits = HashMap::<String, SearchHit>::new();
         let mut best_semantic = 0.0_f64;
         // Bound candidates, but preserve AND matching for filenames/paths.
@@ -547,7 +548,10 @@ impl Store {
             }
             sql.push_str(&format!("instr(folded,?{})>0", i + 1));
         }
-        sql.push_str(" ORDER BY length(name),uri LIMIT 500");
+        sql.push_str(&format!(
+            " ORDER BY length(name),uri LIMIT {}",
+            limit.max(500)
+        ));
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params_from_iter(&terms))?;
         while let Some(r) = rows.next()? {
@@ -562,11 +566,12 @@ impl Store {
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds FROM words
             JOIN chunks c ON c.id=words.rowid JOIN files f ON f.content=c.content
-            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT 500",
-        )?;
+            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {}",
+            limit.max(500)
+        ))?;
         for (rank, row) in stmt
             .query_map([fts], |r| {
                 hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, 0.0)
@@ -683,7 +688,7 @@ pub fn merge_filename_matches(
         });
     }
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
-    hits.truncate(limit.clamp(1, 200));
+    hits.truncate(limit.clamp(1, MAX_RESULTS));
 }
 fn keep_hit(hits: &mut HashMap<String, SearchHit>, h: SearchHit, settings: &Settings) {
     if !settings.allows(&h.path) || !h.path.exists() {

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     fs,
+    io::{Read, Seek, SeekFrom},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -182,8 +183,8 @@ impl Runtime {
                     Ok(mut worker) => {
                         let result = worker.embed(input);
                         if result.is_ok() || result.as_ref().is_err_and(|e| e.is::<InputError>()) {
+                            self.backend = worker.backend.clone();
                             self.worker = Some(worker);
-                            self.backend = backend.label().into();
                             return result;
                         }
                         self.cancellation.check()?;
@@ -232,6 +233,7 @@ struct Worker {
     client: ureq::Agent,
     media_marker: String,
     token_budget: usize,
+    backend: String,
     _socket_dir: tempfile::TempDir,
 }
 impl Worker {
@@ -283,6 +285,8 @@ impl Worker {
             .arg(models.join(model::FILES[0].name))
             .args([
                 "--embedding",
+                "--log-verbosity",
+                "4",
                 "--pooling",
                 "mean",
                 "--ctx-size",
@@ -342,9 +346,12 @@ impl Worker {
         }
         let log = fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .mode(0o600)
             .open(&log_path)?;
+        let mut startup_log = log.try_clone()?;
+        let log_start = log.metadata()?.len();
         cmd.env(
             "LD_LIBRARY_PATH",
             std::env::join_paths(
@@ -358,7 +365,7 @@ impl Worker {
             )?,
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(log.try_clone()?)
         .stderr(log);
         if backend == Backend::Vulkan
             && !std::path::Path::new("/dev/dri").exists()
@@ -379,6 +386,7 @@ impl Worker {
             client: crate::local_http::agent(socket.clone(), Duration::from_secs(timeout)),
             media_marker: String::new(),
             token_budget: context.parse().unwrap(),
+            backend: backend.label().into(),
             _socket_dir: socket_dir,
         };
         cancellation.track(&worker.child)?;
@@ -419,6 +427,10 @@ impl Worker {
             .as_str()
             .context("Upstream runtime has no multimodal API")?
             .to_owned();
+        startup_log.seek(SeekFrom::Start(log_start))?;
+        let mut details = String::new();
+        startup_log.take(1024 * 1024).read_to_string(&mut details)?;
+        worker.backend = device_label(backend, &details);
         Ok(worker)
     }
     fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
@@ -426,7 +438,22 @@ impl Worker {
         let content = match input {
             Input::Text { text } => return self.embed_text(text),
             Input::Image { path } | Input::Audio { path } => {
-                let data = fs::read(path)
+                let file = fs::File::open(path)
+                    .map_err(|e| InputError(format!("Cannot read prepared media: {e}")))?;
+                if file
+                    .metadata()
+                    .map_err(|e| InputError(format!("Cannot inspect prepared media: {e}")))?
+                    .len()
+                    > 32 * 1024 * 1024
+                {
+                    return Err(InputError(
+                        "Prepared media exceeds the embedding input limit".into(),
+                    )
+                    .into());
+                }
+                let mut data = vec![];
+                file.take(32 * 1024 * 1024 + 1)
+                    .read_to_end(&mut data)
                     .map_err(|e| InputError(format!("Cannot read prepared media: {e}")))?;
                 if data.len() > 32 * 1024 * 1024 {
                     return Err(InputError(
@@ -528,6 +555,39 @@ impl Worker {
         Ok(vector)
     }
 }
+
+fn device_label(backend: Backend, log: &str) -> String {
+    if backend == Backend::Cpu {
+        return "CPU".into();
+    }
+    let device = if backend == Backend::Vulkan {
+        "Vulkan0"
+    } else {
+        "CUDA0"
+    };
+    let marker = format!("using device {device} (");
+    let name = log
+        .lines()
+        .filter_map(|line| line.split_once(&marker))
+        .filter_map(|(_, rest)| rest.split_once(") ("))
+        .map(|(name, _)| name)
+        .next();
+    let Some(name) = name else {
+        return format!("{} · device not reported", backend.label());
+    };
+    let lower = name.to_ascii_lowercase();
+    let software = ["llvmpipe", "lavapipe", "swiftshader", "software"]
+        .iter()
+        .any(|s| lower.contains(s));
+    let kind = if software {
+        "Software CPU"
+    } else if log.contains("offloaded 0/") {
+        "CPU · no GPU layers"
+    } else {
+        "GPU"
+    };
+    format!("{} · {kind} · {name}", backend.label())
+}
 impl Drop for Worker {
     fn drop(&mut self) {
         let _ = self.child.lock().unwrap().kill();
@@ -552,6 +612,30 @@ fn normalize(vector: &mut [f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backend_status_identifies_actual_hardware_and_software_devices() {
+        assert_eq!(
+            device_label(
+                Backend::Vulkan,
+                "load: using device Vulkan0 (llvmpipe (LLVM 19, 256 bits)) (unknown id) - 999 MiB free"
+            ),
+            "Vulkan · Software CPU · llvmpipe (LLVM 19, 256 bits)"
+        );
+        assert_eq!(
+            device_label(
+                Backend::Vulkan,
+                "load: using device Vulkan0 (AMD Radeon 780M) (id) - 999 MiB free\noffloaded 25/25 layers to GPU"
+            ),
+            "Vulkan · GPU · AMD Radeon 780M"
+        );
+        assert_eq!(
+            device_label(
+                Backend::Cuda,
+                "load: using device CUDA0 (NVIDIA RTX A500) (id) - 999 MiB free\noffloaded 0/25 layers to GPU"
+            ),
+            "NVIDIA CUDA · CPU · no GPU layers · NVIDIA RTX A500"
+        );
+    }
     #[test]
     #[ignore = "Terminates and restarts a real inference helper; needs the pinned model and runtime"]
     fn worker_restarts_after_process_failure() -> Result<()> {
@@ -580,6 +664,15 @@ mod tests {
             path: paths.cache.join("missing-test-image.png"),
         };
         let error = runtime.embed(&missing_media).unwrap_err();
+        assert!(error.is::<InputError>());
+        let large = paths.cache.join("oversized-test-image.png");
+        fs::File::create(&large)?.set_len(32 * 1024 * 1024 + 1)?;
+        let error = runtime
+            .embed(&Input::Image {
+                path: large.clone(),
+            })
+            .unwrap_err();
+        fs::remove_file(large)?;
         assert!(error.is::<InputError>());
         assert_eq!(
             runtime.worker.as_ref().unwrap().child.lock().unwrap().id(),

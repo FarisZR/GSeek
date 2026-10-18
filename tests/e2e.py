@@ -289,6 +289,42 @@ class EndToEnd(unittest.TestCase):
             self.remove(dense)
             dense.unlink()
 
+    def test_05d_filename_lookup_failure_keeps_existing_semantic_results(self):
+        def reject_filename_query(connection, message, incoming, _data):
+            body = message.get_body()
+            if incoming and message.get_member() == "Query" and body and "fts:match" in str(body):
+                reply = message.new_method_error_literal("org.freedesktop.DBus.Error.Failed", "Filename lookup interrupted for recovery test")
+                connection.send_message(reply, Gio.DBusSendMessageFlags.NONE)
+                return None
+            return message
+        filter_id = self.bus.add_filter(reject_filename_query, None)
+        try:
+            self.assertEqual(self.search("the clause about pets in my lease")[0]["name"], "Rental Agreement.txt")
+            self.assertIn("Filename lookup interrupted", self.status()["filename_error"])
+            self.assertTrue(self.status()["ready"])
+        finally:
+            self.bus.remove_filter(filter_id)
+        self.search("Rental Agreement")
+        self.assertEqual(self.status()["filename_error"], "")
+
+    def test_05e_filename_paging_skips_excluded_candidates_before_limiting(self):
+        directory = ROOT / "Paged Results"
+        directory.mkdir()
+        hidden = [directory / f".Paging Item {i:03}.txt" for i in range(520)]
+        visible = directory / "Paging Item Visible.txt"
+        visible.write_text("This content is outside embedding scope.")
+        entries = []
+        for path in hidden + [visible]:
+            entries.append(f'<{path.as_uri()}> a nfo:FileDataObject ; nie:url {json.dumps(path.as_uri())} ; nfo:fileName {json.dumps(path.name)} .')
+        self.conn.update('INSERT DATA { GRAPH tracker:FileSystem { ' + ' '.join(entries) + ' } }', None)
+        try:
+            hits = self.search("Paging Item")
+            self.assertEqual([hit["uri"] for hit in hits if "Paging Item" in hit["name"]], [visible.as_uri()])
+        finally:
+            self.conn.update('DELETE { GRAPH tracker:FileSystem { ?s ?p ?o } } WHERE { GRAPH tracker:FileSystem { ?s ?p ?o . FILTER (STRSTARTS(STR(?s), ' + json.dumps(directory.as_uri() + '/') + ')) } }', None)
+            visible.unlink()
+            directory.rmdir()
+
     def test_06_exclusions_prune_previously_indexed_files(self):
         note = self.docs / "Excluded Note.md"
         note.write_text("A handmade ceramic teapot with a green glaze.")
@@ -414,7 +450,10 @@ class EndToEnd(unittest.TestCase):
             update(restore)
             wait_for(lambda: not Path(f"/proc/{pid}").exists(), timeout=5)
             wait_for(lambda: self.status()["ready"], timeout=300)
-            self.assertEqual(self.status()["backend"], "CPU" if restore == "auto" else "Vulkan")
+            if restore == "auto":
+                self.assertEqual(self.status()["backend"], "CPU")
+            else:
+                self.assertIn("Vulkan · Software CPU · llvmpipe", self.status()["backend"])
             probe.write_text("A recovered indexing job records the silver telescope lens.")
             self.add(probe)
             wait_for(lambda: any(hit["uri"] == probe.as_uri() for hit in self.search("silver telescope lens")))
@@ -459,9 +498,40 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse((root / "data/dbus-1/services/io.github.FarisZR.GSeek.Service.service").exists())
         wait_for(lambda:self.status()["ready"])
 
+    def test_07b_show_all_launches_and_updates_the_existing_native_window(self):
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("Needs a native display")
+        def running():
+            return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", ("io.github.FarisZR.GSeek",)), None, Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+        self.invoke("LaunchSearch", GLib.Variant("(asu)", (["Rental", "Agreement"], 0)), SHELL_IFACE, PROVIDER)
+        wait_for(running)
+        actions = Gio.DBusActionGroup.get(self.bus, "io.github.FarisZR.GSeek", "/io/github/FarisZR/GSeek")
+        def query():
+            state = actions.get_action_state("search")
+            return state.unpack() if state else None
+        try:
+            wait_for(lambda: query() == "Rental Agreement")
+            self.invoke("LaunchSearch", GLib.Variant("(asu)", (["Tomato", "Soup"], 0)), SHELL_IFACE, PROVIDER)
+            wait_for(lambda: query() == "Tomato Soup")
+        finally:
+            actions.activate_action("quit", None)
+            wait_for(lambda: not running())
+
     def test_08_native_gtk_views(self):
         if os.environ.get("GSEEK_GUI_TEST_COMMAND"):
-            subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
+            downloads = ROOT / "Downloads"
+            downloads.mkdir(exist_ok=True)
+            files = [downloads / f"Show All Results {i}.txt" for i in range(7)]
+            for path in files:
+                path.write_text("Only the filename should be searched.")
+                self.add(path)
+            try:
+                wait_for(lambda: len([hit for hit in self.search("Show All Results") if hit["name"].startswith("Show All Results")]) == 7)
+                subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
+            finally:
+                for path in files:
+                    self.remove(path)
+                    path.unlink()
             self.assertTrue(self.status()["ready"],"Closing the GTK window must not stop the background service")
         else:
             self.skipTest("Run under Xvfb or GNOME with GSEEK_GUI_TEST_COMMAND to capture native views")
