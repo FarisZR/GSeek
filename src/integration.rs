@@ -86,8 +86,12 @@ pub fn install(paths: &Paths, launcher: &Path) -> Result<()> {
         (
             data.join(format!("applications/{APP_ID}.desktop")),
             format!(
-                "[Desktop Entry]\nType=Application\nName=GSeek\nComment=Find your files by what you remember\nExec={exec}\nIcon={icon}\nTerminal=false\nCategories=GNOME;GTK;Utility;\nKeywords=Search;Files;Semantic;\nStartupNotify=true\n"
+                "[Desktop Entry]\nType=Application\nName=GSeek\nComment=Find your files by what you remember\nExec={exec}\nIcon={icon}\nTerminal=false\nCategories=GNOME;GTK;Utility;\nKeywords=Search;Files;Semantic;\nStartupNotify=true\nDBusActivatable=true\n"
             ),
+        ),
+        (
+            data.join(format!("dbus-1/services/{APP_ID}.service")),
+            format!("[D-BUS Service]\nName={APP_ID}\nExec={dbus_exec}\n"),
         ),
         (
             data.join(format!("dbus-1/services/{BUS_NAME}.service")),

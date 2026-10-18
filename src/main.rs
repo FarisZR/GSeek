@@ -80,7 +80,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some(Action::Results { query }) => open_ui(paths, Some(query)),
-        Some(Action::Restart) => gseek::lifecycle::restart(&paths),
+        Some(Action::Restart) => gseek::lifecycle::restart(),
         Some(Action::PrepareModel) => gseek::model::ensure(&paths, |_, _, _| Ok(())),
         Some(Action::Embed { text, image, audio }) => {
             let settings = paths.load()?;

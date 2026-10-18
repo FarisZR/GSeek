@@ -50,8 +50,7 @@ def render(version, url, arm_sha, intel_sha):
       File.join(Dir.home, fallback)
     end
   end
-  %w[DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR DISPLAY WAYLAND_DISPLAY XAUTHORITY
-     XDG_CURRENT_DESKTOP XDG_SESSION_TYPE].each do |name|
+  %w[DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR].each do |name|
     value = ENV["HOMEBREW_#{{name}}"] || ENV[name]
     integration_env[name] = value if value && !value.empty?
   end
@@ -70,6 +69,7 @@ def render(version, url, arm_sha, intel_sha):
     run app_launcher,
         args: ["integrate"],
         env: integration_env,
+        network_access: true,
         writable_paths: user_paths
   end
 
@@ -77,6 +77,7 @@ def render(version, url, arm_sha, intel_sha):
     run app_launcher,
         args: ["unintegrate"],
         env: integration_env,
+        network_access: true,
         writable_paths: user_paths
   end
 
