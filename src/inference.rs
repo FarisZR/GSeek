@@ -568,6 +568,7 @@ fn device_label(backend: Backend, log: &str) -> String {
     let marker = format!("using device {device} (");
     let name = log
         .lines()
+        .rev()
         .filter_map(|line| line.split_once(&marker))
         .filter_map(|(_, rest)| rest.split_once(") ("))
         .map(|(name, _)| name)
@@ -579,9 +580,14 @@ fn device_label(backend: Backend, log: &str) -> String {
     let software = ["llvmpipe", "lavapipe", "swiftshader", "software"]
         .iter()
         .any(|s| lower.contains(s));
+    let no_gpu_layers = log
+        .lines()
+        .rev()
+        .find(|line| line.contains("offloaded "))
+        .is_some_and(|line| line.contains("offloaded 0/"));
     let kind = if software {
         "Software CPU"
-    } else if log.contains("offloaded 0/") {
+    } else if no_gpu_layers {
         "CPU · no GPU layers"
     } else {
         "GPU"
@@ -612,6 +618,14 @@ fn normalize(vector: &mut [f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memory_fitting_reports_the_final_offload_decision() {
+        let log = "load: using device Vulkan0 (AMD Radeon 780M) (id) - 999 MiB free\noffloaded 0/25 layers to GPU\noffloaded 18/25 layers to GPU";
+        assert_eq!(
+            device_label(Backend::Vulkan, log),
+            "Vulkan · GPU · AMD Radeon 780M"
+        );
+    }
     #[test]
     fn backend_status_identifies_actual_hardware_and_software_devices() {
         assert_eq!(
