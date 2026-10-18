@@ -525,6 +525,8 @@ class EndToEnd(unittest.TestCase):
             wait_for(lambda: not running())
 
     def test_07c_restart_menu_and_install_replace_the_live_window_and_service(self):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            self.skipTest("Needs a native display")
         app_id = "io.github.FarisZR.GSeek"
         def owner(name):
             try:

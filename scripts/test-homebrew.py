@@ -13,8 +13,19 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 if "GSEEK_BREW_TEST_SESSION" not in os.environ:
     # Keep the application alive in one desktop session through actual upgrades.
-    os.execvpe("xvfb-run", ["xvfb-run", "-a", "dbus-run-session", "--", sys.executable, __file__],
-              {**os.environ, "GSEEK_BREW_TEST_SESSION": "1"})
+    with tempfile.TemporaryFile(mode="w+") as session_log:
+        session = subprocess.run(["xvfb-run", "-a", "dbus-run-session", "--", sys.executable, __file__],
+                  env={**os.environ, "GSEEK_BREW_TEST_SESSION": "1"}, text=True,
+                  stdout=session_log, stderr=subprocess.STDOUT)
+        session_log.seek(0)
+        output = session_log.read()
+    print(output, end="")
+    if session.returncode:
+        raise SystemExit(session.returncode)
+    # D-Bus-activated replacements inherit the session log, not initial_window's
+    # file descriptors. Check both, including every upgrade/restart/reinstall.
+    assert "CRITICAL" not in output and "symbol lookup error" not in output, output
+    raise SystemExit(0)
 spec = importlib.util.spec_from_file_location("render_cask", ROOT / "scripts/render-cask.py")
 cask = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cask)
@@ -76,9 +87,10 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         desktop = data / "applications/io.github.FarisZR.GSeek.desktop"
         service = data / "dbus-1/services/io.github.FarisZR.GSeek.Service.service"
+        application = data / "dbus-1/services/io.github.FarisZR.GSeek.service"
         provider = Path("/usr/local/share/gnome-shell/search-providers/io.github.FarisZR.GSeek.ini")
         autostart = config / "autostart/io.github.FarisZR.GSeek.desktop"
-        for path in [desktop, service, provider, autostart]:
+        for path in [desktop, service, application, provider, autostart]:
             assert path.is_file(), path
         assert "/.local/share/gseek-app/bin/gseek" in desktop.read_text()
         icon = Path(next(line[5:] for line in desktop.read_text().splitlines() if line.startswith("Icon=")))
@@ -104,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix="gseek-tap-") as temporary:
         assert "CRITICAL" not in output and "symbol lookup error" not in output, output
         run("brew", "uninstall", "--cask", "gseek")
         installed = False
-        for path in [desktop, service, provider, autostart, icon]:
+        for path in [desktop, service, application, provider, autostart, icon]:
             assert not path.exists(), f"Stale registration: {path}"
         assert sentinel.is_file()
     finally:

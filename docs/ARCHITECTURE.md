@@ -119,7 +119,9 @@ asks the window to close, lets pending preference saves finish, waits for the
 captured window/provider owners to release their names, and writes registration.
 Configured installations reactivate the provider through D-Bus and reopen the
 previous window at the stable installed launcher path. `gseek restart` and the
-main menu use the same lifecycle. No process-name matching or inference fallback
+main menu use the same lifecycle. Both the UI and provider have D-Bus activation
+entries so replacement processes start in the desktop session, outside the
+package manager's sandbox. No process-name matching or inference fallback
 is involved. Status includes the running provider version for diagnostics.
 
 ## Native setup
