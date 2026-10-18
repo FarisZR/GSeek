@@ -191,14 +191,11 @@ pub fn run(paths: Paths) -> Result<()> {
                                 let (ids,) = parameters
                                     .get::<(Vec<String>,)>()
                                     .context("Invalid identifiers")?;
-                                let store = Store::open(&spaths.database())?;
                                 let settings = spaths.load()?;
                                 let mut metas = vec![];
                                 for id in ids.iter().take(100) {
-                                    if let Some(file) = store.file(id)? {
-                                        if !settings.allows(&file.path) {
-                                            continue;
-                                        }
+                                    if let Some(file) = discovery::record_for_search(id, &settings)?
+                                    {
                                         let icon = integration::icon_for(&file.path, &file.mime);
                                         let mut meta = std::collections::HashMap::<
                                             String,
@@ -565,13 +562,18 @@ impl SearchQueue {
                     if generation.load(Ordering::Relaxed) != job.generation {
                         return Ok(vec![]);
                     }
-                    Store::open(&paths.database())?.search(
+                    let mut hits = Store::open(&paths.database())?.search(
                         &job.query,
                         &vector,
                         &runtime.fingerprint(),
                         &settings,
                         job.limit,
-                    )
+                    )?;
+                    // LocalSearch remains the authority for ordinary filename results,
+                    // including Downloads and formats without a content reader.
+                    let files = discovery::filename_matches(&job.query, &settings)?;
+                    crate::store::merge_filename_matches(&mut hits, files, &job.query, job.limit);
+                    Ok(hits)
                 })()
                 .map_err(|e| format!("{e:#}"));
                 let _ = job.reply.send_blocking(result);

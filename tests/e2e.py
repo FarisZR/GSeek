@@ -100,7 +100,7 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def add(cls, path):
         uri = path.as_uri()
-        cls.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ <{uri}> a nfo:FileDataObject ; nie:url {json.dumps(uri)} . }} }}', None)
+        cls.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ <{uri}> a nfo:FileDataObject ; nie:url {json.dumps(uri)} ; nfo:fileName {json.dumps(path.name, ensure_ascii=False)} . }} }}', None)
 
     @classmethod
     def remove(cls, path):
@@ -153,6 +153,40 @@ class EndToEnd(unittest.TestCase):
         self.invoke("ActivateResult",GLib.Variant("(sasu)",(uri,["pets"],0)),SHELL_IFACE,PROVIDER)
         wait_for(output.exists)
         self.assertTrue(any(Gio.File.new_for_commandline_arg(arg).equal(Gio.File.new_for_uri(uri)) for arg in json.loads(output.read_text())))
+
+    def test_02c_gnome_filename_results_do_not_embed_downloads_or_unsupported_files(self):
+        downloads = ROOT / "Downloads"
+        downloads.mkdir(exist_ok=True)
+        visible = [downloads / "Boarding Pass العربية.txt", downloads / "Backup Archive.zip"]
+        hidden = [downloads / ".Boarding Hidden.txt", downloads / "Boarding Key.pem"]
+        for path in visible + hidden:
+            path.write_text("This content must never enter the embedding queue.")
+            self.add(path)
+        try:
+            hits = self.search("Pass العربية")
+            self.assertTrue(any(hit["uri"] == visible[0].as_uri() for hit in hits), hits)
+            self.assertTrue(any(hit["uri"] == visible[1].as_uri() for hit in self.search("Backup Archive")))
+            ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", (["Boarding", "Pass"],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertIn(visible[0].as_uri(), ids)
+            metas = self.invoke("GetResultMetas", GLib.Variant("(as)", ([visible[0].as_uri()],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertEqual(metas[0]["name"], visible[0].name)
+            self.assertIn("icon", metas[0])
+            self.assertFalse(any(hit["uri"] in [p.as_uri() for p in hidden] for hit in self.search("Boarding")))
+            with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
+                for path in visible + hidden:
+                    self.assertIsNone(db.execute("SELECT uri FROM files WHERE uri=?", (path.as_uri(),)).fetchone())
+            # An ordinary filename result must open with the same Shell action.
+            output = ROOT / "opened.json"
+            output.unlink(missing_ok=True)
+            self.invoke("ActivateResult", GLib.Variant("(sasu)", (visible[0].as_uri(), ["Boarding"], 0)), SHELL_IFACE, PROVIDER)
+            wait_for(output.exists)
+            self.assertTrue(any(Gio.File.new_for_commandline_arg(arg).equal(Gio.File.new_for_path(str(visible[0]))) for arg in json.loads(output.read_text())))
+            self.remove(visible[0])
+            self.assertFalse(any(hit["uri"] == visible[0].as_uri() for hit in self.search("Pass العربية")))
+        finally:
+            for path in visible + hidden:
+                self.remove(path)
+                path.unlink()
 
     def test_02c_real_gnome_overview_loads_and_queries_the_provider(self):
         if not os.environ.get("GSEEK_TEST_SHELL"):
@@ -238,6 +272,22 @@ class EndToEnd(unittest.TestCase):
                 self.remove(path)
             self.command("resume")
             wait_for(lambda: self.status()["counts"]["pending"] == 0)
+
+    def test_05c_dense_input_finishes_without_stopping_indexing(self):
+        dense = self.docs / "Dense Unicode.txt"
+        dense.write_text("1234567890🧬測試العربية" * 160)
+        self.add(dense)
+        def indexed():
+            with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
+                row = db.execute("SELECT state FROM files WHERE uri=?", (dense.as_uri(),)).fetchone()
+                return row and row[0] == "indexed"
+        try:
+            wait_for(indexed)
+            self.assertTrue(self.status()["ready"])
+            self.assertEqual(self.search("Dense Unicode.txt")[0]["uri"], dense.as_uri())
+        finally:
+            self.remove(dense)
+            dense.unlink()
 
     def test_06_exclusions_prune_previously_indexed_files(self):
         note = self.docs / "Excluded Note.md"

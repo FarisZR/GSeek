@@ -33,7 +33,11 @@ SQLite owns metadata, the indexing queue, content-addressed chunks, FTS5, normal
 indexing, and queries concurrently. Versioned transactional migrations preserve
 existing indexed content; newer unknown schemas are rejected.
 
-Search requires a validated embedding. Filenames and paths, exact text, and
+Search requires a validated embedding. GNOME LocalSearch supplies ordinary filename
+results across its existing scope, including files outside the embedding folders.
+These results are stat-checked against privacy and explicit exclusion rules,
+deduplicated with semantic matches, and never saved to the embedding queue.
+Filenames and paths, exact text, and
 semantic cosine similarity contribute to ranking. Weak semantic neighbors are
 filtered relative to the best match. Results are deduplicated by file. The service
 bounds its queue and drops stale requests separately for Shell and diagnostic clients; it
@@ -51,8 +55,12 @@ A reference canary validates query framing and pooling at setup. There is no
 keyword-only mode when inference is unavailable. The upstream server owns model loading,
 encoding, and GPU execution. GSeek uses a small query context and a larger media
 context, requests mean pooling and L2 normalization, and validates every vector.
-Auto hardware
-selection retries with another backend if initialization or inference fails; an
+The upstream tokenizer bounds text inputs to the actual query/index batch budget.
+Dense chunks are split at UTF-8 boundaries with the task prompt repeated, then
+token-weighted vectors are pooled and normalized without dropping content or
+changing checkpoint numbering. File/input errors leave the healthy worker alive
+and fail only that file; backend/transport errors retain the recovery path.
+Auto hardware selection retries with another backend if initialization or inference fails; an
 explicit backend reports its failure.
 
 Preference updates merge individual fields against the latest saved settings on
@@ -99,3 +107,17 @@ The welcome icon loads directly from an embedded PNG resource, independent of ic
 installation, SVG loaders, and stale theme caches. Desktop entries reference an
 owned, installed PNG by absolute path. Icon files participate in the same upgrade
 and uninstall manifest as other desktop registrations.
+
+## Native setup
+
+Setup stays in the primary window, with a Back button, a single task heading,
+clamped content, and standard boxed folder lists. The welcome status page centers
+its description and setup checklist. Preferences save immediately. Downloads is
+not a default content location; filename search still follows GNOME’s index.
+
+The design follows the GNOME HIG source (cloned and read for these changes):
+[placeholder pages](https://developer.gnome.org/hig/patterns/feedback/placeholders.html),
+[dialogs](https://developer.gnome.org/hig/patterns/feedback/dialogs.html),
+[boxed lists](https://developer.gnome.org/hig/patterns/containers/boxed-lists.html),
+[writing style](https://developer.gnome.org/hig/guidelines/writing-style.html), and
+[adaptiveness](https://developer.gnome.org/hig/guidelines/adaptive.html).

@@ -40,6 +40,16 @@ impl std::fmt::Display for InferenceError {
 }
 impl std::error::Error for InferenceError {}
 
+/// An unsuitable file must not restart a healthy engine or stop the whole queue.
+#[derive(Debug)]
+struct InputError(String);
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for InputError {}
+
 impl Runtime {
     pub fn new(paths: &Paths, settings: &Settings, query_only: bool) -> Self {
         Self {
@@ -112,7 +122,13 @@ impl Runtime {
     pub fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
         let result = self.embed_inner(input);
         self.cancellation.check()?;
-        result.map_err(|e| InferenceError(format!("{e:#}")).into())
+        result.map_err(|e| {
+            if e.is::<InputError>() {
+                e
+            } else {
+                InferenceError(format!("{e:#}")).into()
+            }
+        })
     }
     fn embed_inner(&mut self, input: &Input) -> Result<Vec<f32>> {
         self.cancellation.check()?;
@@ -155,22 +171,23 @@ impl Runtime {
         if self.worker.is_none() {
             let mut failures = vec![];
             for backend in candidates(self.settings.backend) {
-                let attempt: Result<_> = (|| {
-                    let mut worker = Worker::start(
-                        &self.paths,
-                        self.query_only,
-                        backend,
-                        &self.cancellation,
-                        &self.progress,
-                    )?;
-                    let vector = worker.embed(input)?;
-                    Ok((worker, vector))
-                })();
+                let attempt = Worker::start(
+                    &self.paths,
+                    self.query_only,
+                    backend,
+                    &self.cancellation,
+                    &self.progress,
+                );
                 match attempt {
-                    Ok((worker, vector)) => {
-                        self.worker = Some(worker);
-                        self.backend = backend.label().into();
-                        return Ok(vector);
+                    Ok(mut worker) => {
+                        let result = worker.embed(input);
+                        if result.is_ok() || result.as_ref().is_err_and(|e| e.is::<InputError>()) {
+                            self.worker = Some(worker);
+                            self.backend = backend.label().into();
+                            return result;
+                        }
+                        self.cancellation.check()?;
+                        failures.push(format!("{}: {:#}", backend.label(), result.unwrap_err()));
                     }
                     Err(e) => {
                         self.cancellation.check()?;
@@ -181,7 +198,7 @@ impl Runtime {
             bail!("Cannot start EmbeddingGemma 2. {}", failures.join("\n"));
         }
         let result = self.worker.as_mut().unwrap().embed(input);
-        if result.is_err() {
+        if result.as_ref().is_err_and(|e| !e.is::<InputError>()) {
             self.worker = None;
             self.cache.clear();
             if self.settings.backend == Backend::Auto {
@@ -214,6 +231,7 @@ struct Worker {
     child: Arc<Mutex<Child>>,
     client: ureq::Agent,
     media_marker: String,
+    token_budget: usize,
     _socket_dir: tempfile::TempDir,
 }
 impl Worker {
@@ -360,6 +378,7 @@ impl Worker {
             )),
             client: crate::local_http::agent(socket.clone(), Duration::from_secs(timeout)),
             media_marker: String::new(),
+            token_budget: context.parse().unwrap(),
             _socket_dir: socket_dir,
         };
         cancellation.track(&worker.child)?;
@@ -405,15 +424,74 @@ impl Worker {
     fn embed(&mut self, input: &Input) -> Result<Vec<f32>> {
         use base64::Engine;
         let content = match input {
-            Input::Text { text } => json!(text),
+            Input::Text { text } => return self.embed_text(text),
             Input::Image { path } | Input::Audio { path } => {
-                let data = fs::read(path)?;
+                let data = fs::read(path)
+                    .map_err(|e| InputError(format!("Cannot read prepared media: {e}")))?;
                 if data.len() > 32 * 1024 * 1024 {
-                    bail!("Prepared media exceeds the embedding input limit");
+                    return Err(InputError(
+                        "Prepared media exceeds the embedding input limit".into(),
+                    )
+                    .into());
                 }
                 json!({"prompt_string":self.media_marker,"multimodal_data":[base64::engine::general_purpose::STANDARD.encode(data)]})
             }
         };
+        self.embed_content(content)
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
+        let response: Value = self
+            .client
+            .post("http://127.0.0.1/tokenize")
+            .send_json(json!({"content":text,"add_special":true,"parse_special":false}))?
+            .body_mut()
+            .read_json()?;
+        Ok(serde_json::from_value(response["tokens"].clone())?)
+    }
+
+    fn text_segments(&self, prefix: &str, text: &str, result: &mut Vec<Vec<i32>>) -> Result<()> {
+        let tokens = self.tokenize(&format!("{prefix}{text}"))?;
+        if tokens.len() <= self.token_budget {
+            result.push(tokens);
+            return Ok(());
+        }
+        // Split only at UTF-8 boundaries. Retokenize each half with its task prompt:
+        // character counts alone cannot bound Arabic, CJK, emoji, or source code.
+        let midpoint = text
+            .char_indices()
+            .nth(text.chars().count() / 2)
+            .map(|(i, _)| i)
+            .filter(|i| *i > 0)
+            .ok_or_else(|| InputError("The text cannot fit the model's input limit".into()))?;
+        self.text_segments(prefix, &text[..midpoint], result)?;
+        self.text_segments(prefix, &text[midpoint..], result)
+    }
+
+    fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+        let (prefix, body) = ["title: none | text: ", "task: search result | query: "]
+            .into_iter()
+            .find_map(|p| text.strip_prefix(p).map(|s| (p, s)))
+            .unwrap_or(("", text));
+        let mut segments = vec![];
+        self.text_segments(prefix, body, &mut segments)?;
+        if segments.len() == 1 {
+            return self.embed_content(json!(segments[0]));
+        }
+        // Preserve every part of a dense text chunk without increasing GPU memory
+        // or changing its checkpoint identity. Pool bounded vectors by token count.
+        let mut pooled = vec![0.0; DIMENSIONS];
+        for tokens in segments {
+            let weight = tokens.len() as f32;
+            for (sum, value) in pooled.iter_mut().zip(self.embed_content(json!(tokens))?) {
+                *sum += value * weight;
+            }
+        }
+        normalize(&mut pooled)?;
+        Ok(pooled)
+    }
+
+    fn embed_content(&self, content: Value) -> Result<Vec<f32>> {
         let mut reply = self
             .client
             .post("http://127.0.0.1/embedding")
@@ -428,6 +506,15 @@ impl Worker {
             let message = response["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown runtime error");
+            if status.as_u16() == 400
+                || status.as_u16() == 413
+                || message.contains("too large to process")
+                || message.contains("exceeds the available context")
+            {
+                return Err(
+                    InputError(format!("This file could not be embedded: {message}")).into(),
+                );
+            }
             bail!("Embedding failed ({status}): {message}");
         }
         let embedding = &response[0]["embedding"];
@@ -481,6 +568,24 @@ mod tests {
             text: "task: search result | query: the clause about pets in the lease".into(),
         };
         let expected = runtime.embed(&input)?;
+        let pid = runtime.worker.as_ref().unwrap().child.lock().unwrap().id();
+        let error = runtime
+            .worker
+            .as_ref()
+            .unwrap()
+            .embed_content(json!(vec![1; 513]))
+            .unwrap_err();
+        assert!(error.is::<InputError>(), "{error:#}");
+        let missing_media = Input::Image {
+            path: paths.cache.join("missing-test-image.png"),
+        };
+        let error = runtime.embed(&missing_media).unwrap_err();
+        assert!(error.is::<InputError>());
+        assert_eq!(
+            runtime.worker.as_ref().unwrap().child.lock().unwrap().id(),
+            pid
+        );
+        assert_eq!(runtime.embed(&input)?, expected);
         let worker = runtime.worker.as_mut().unwrap();
         worker.child.lock().unwrap().kill()?;
         worker.child.lock().unwrap().wait()?;

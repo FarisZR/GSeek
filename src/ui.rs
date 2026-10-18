@@ -101,7 +101,7 @@ impl Window {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("GSeek")
-            .default_width(900)
+            .default_width(720)
             .default_height(700)
             .build();
         let root = adw::ToolbarView::new();
@@ -115,20 +115,37 @@ impl Window {
             .tooltip_text("Main Menu")
             .build();
         header.pack_end(&menu_button);
+        let back = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back")
+            .visible(false)
+            .build();
+        header.pack_start(&back);
         root.add_top_bar(&header);
         let main_stack = gtk::Stack::new();
         root.set_content(Some(&main_stack));
         window.set_content(Some(&root));
 
-        let welcome=adw::StatusPage::builder().paintable(&gtk::gdk::Texture::from_resource("/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png")).title("Find your files by what you remember")
-            .description("Describe a document, photo, or moment in a recording. GSeek brings private, multilingual search to your GNOME overview.").build();
-        let welcome_box = vertical(16);
-        let privacy = label(
-            "Everything stays on this computer.\nEmbeddingGemma 2 downloads once (865 MB).",
+        let welcome = adw::StatusPage::builder()
+            .paintable(&gtk::gdk::Texture::from_resource(
+                "/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png",
+            ))
+            .title("Set Up GSeek")
+            .description("Search documents, photos, and recordings from the Activities overview")
+            .build();
+        let welcome_box = vertical(24);
+        let privacy = label("Files stay on this computer", "dim-label");
+        privacy.set_justify(gtk::Justification::Center);
+        privacy.set_xalign(0.5);
+        welcome_box.append(&privacy);
+        let checklist = label(
+            "✓ GSeek installed\nDownload EmbeddingGemma 2 (865 MB)\nDownload the inference runtime\nSelect a backend automatically",
             "dim-label",
         );
-        welcome_box.append(&privacy);
-        let start = gtk::Button::with_label("Set Up Search");
+        checklist.set_justify(gtk::Justification::Center);
+        checklist.set_xalign(0.5);
+        welcome_box.append(&checklist);
+        let start = gtk::Button::with_label("Choose Folders");
         start.add_css_class("suggested-action");
         start.add_css_class("pill");
         start.set_halign(gtk::Align::Center);
@@ -202,6 +219,11 @@ impl Window {
             .child(&activity_box)
             .build();
         body.append(&activity_clamp);
+        let back_stack = main_stack.clone();
+        back.connect_clicked(move |_| back_stack.set_visible_child_name("welcome"));
+        main_stack.connect_visible_child_name_notify(move |stack| {
+            back.set_visible(stack.visible_child_name().as_deref() == Some("setup"));
+        });
         let ui = Rc::new(Self {
             window,
             main_stack,
@@ -304,13 +326,15 @@ impl Window {
                 match result {
                     Ok(s) => {
                         let configured = ui.paths.load().map(|s| s.configured).unwrap_or(false);
-                        ui.main_stack.set_visible_child_name(
-                            if configured || s.state == "setup" || s.state == "error" {
-                                "library"
-                            } else {
-                                "welcome"
-                            },
-                        );
+                        if ui.main_stack.visible_child_name().as_deref() != Some("setup") {
+                            ui.main_stack.set_visible_child_name(
+                                if configured || s.state == "setup" || s.state == "error" {
+                                    "library"
+                                } else {
+                                    "welcome"
+                                },
+                            );
+                        }
                         ui.banner.set_revealed(
                             !s.ready || s.state == "error" || !s.discovery_error.is_empty(),
                         );
@@ -402,12 +426,7 @@ impl Window {
         }
     }
 
-    fn apply_settings(
-        self: &Rc<Self>,
-        settings: Settings,
-        dialog: &adw::Dialog,
-        button: &gtk::Button,
-    ) {
+    fn apply_settings(self: &Rc<Self>, settings: Settings, button: &gtk::Button) {
         if settings.folders.is_empty() {
             self.error("Choose at least one search folder.");
             return;
@@ -417,15 +436,16 @@ impl Window {
             return;
         }
         button.set_sensitive(false);
-        let close = dialog.downgrade();
+        let weak = Rc::downgrade(self);
         let button = button.clone();
         self.queue_settings(SettingsWrite {
             method: "Configure",
             value: serde_json::to_value(settings).unwrap(),
             complete: Some(Box::new(move |saved| {
                 button.set_sensitive(true);
-                if saved && let Some(dialog) = close.upgrade() {
-                    dialog.close();
+                if saved && let Some(ui) = weak.upgrade() {
+                    ui.main_stack.set_visible_child_name("library");
+                    ui.refresh();
                 }
             })),
         });
@@ -491,28 +511,24 @@ impl Window {
             }
         };
         let draft = Rc::new(RefCell::new(settings));
-        let dialog = adw::Dialog::builder()
-            .title("Set Up GSeek")
-            .content_width(600)
-            .content_height(580)
-            .build();
+        if let Some(previous) = self.main_stack.child_by_name("setup") {
+            self.main_stack.remove(&previous);
+        }
         let toolbar = adw::ToolbarView::new();
-        let header = adw::HeaderBar::new();
-        toolbar.add_top_bar(&header);
         let content = vertical(24);
         margins(&content, 24);
-        let intro = label("Your files. Your words.", "title-1");
+        let intro = label("Set Up GSeek", "title-1");
         intro.set_xalign(0.0);
         content.append(&intro);
         let description = label(
-            "Choose the folders you want to search. GSeek downloads EmbeddingGemma 2 once (865 MB) and keeps your search library on this computer.",
+            "Choose folders for content search. Files elsewhere in GNOME’s search locations remain searchable by name.",
             "dim-label",
         );
         description.set_xalign(0.0);
         content.append(&description);
         let locations = adw::PreferencesGroup::builder()
-            .title("Search Locations")
-            .description("Files must also be included in GNOME’s Search Locations.")
+            .title("Choose Folders")
+            .description("Only files also included in GNOME’s Search Locations can be embedded.")
             .build();
         let folders = gtk::ListBox::new();
         folders.add_css_class("boxed-list");
@@ -544,41 +560,61 @@ impl Window {
             .vexpand(true)
             .child(&content)
             .build();
-        toolbar.set_content(Some(&scroller));
+        let clamp = adw::Clamp::builder()
+            .maximum_size(600)
+            .child(&scroller)
+            .build();
+        toolbar.set_content(Some(&clamp));
         let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         margins(&footer, 16);
-        let advanced = gtk::Button::with_label("Advanced Setup…");
+        let advanced = gtk::Button::with_label("Preferences");
         advanced.add_css_class("flat");
         footer.append(&advanced);
         let start = gtk::Button::with_label("Download & Start");
         start.add_css_class("suggested-action");
         start.set_hexpand(true);
         footer.append(&start);
-        toolbar.add_bottom_bar(&footer);
-        dialog.set_child(Some(&toolbar));
+        let footer_clamp = adw::Clamp::builder()
+            .maximum_size(600)
+            .child(&footer)
+            .build();
+        toolbar.add_bottom_bar(&footer_clamp);
+        self.main_stack.add_named(&toolbar, Some("setup"));
         let weak = Rc::downgrade(self);
-        let close = dialog.downgrade();
         let settings = draft.clone();
         start.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade()
-                && let Some(dialog) = close.upgrade()
-            {
+            if let Some(ui) = weak.upgrade() {
                 let mut s = settings.borrow().clone();
                 s.search_enabled = replace.is_active();
-                ui.apply_settings(s, &dialog, button);
+                ui.apply_settings(s, button);
             }
         });
         let weak = Rc::downgrade(self);
-        let close = dialog.downgrade();
         advanced.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                if let Some(dialog) = close.upgrade() {
-                    dialog.close();
+                ui.preferences(None);
+                if let Some(dialog) = ui.window.visible_dialog() {
+                    let weak = Rc::downgrade(&ui);
+                    dialog.connect_closed(move |_| {
+                        let weak = weak.clone();
+                        glib::timeout_add_local(Duration::from_millis(50), move || {
+                            let Some(ui) = weak.upgrade() else {
+                                return glib::ControlFlow::Break;
+                            };
+                            if ui.saving_settings.get() {
+                                return glib::ControlFlow::Continue;
+                            }
+                            if ui.main_stack.visible_child_name().as_deref() == Some("setup") {
+                                ui.setup();
+                            }
+                            glib::ControlFlow::Break
+                        });
+                    });
                 }
-                ui.preferences(Some(draft.borrow().clone()));
             }
         });
-        dialog.present(Some(&self.window));
+        self.main_stack.set_visible_child_name("setup");
+        add.grab_focus();
     }
 
     fn preferences(self: &Rc<Self>, initial: Option<Settings>) {
@@ -599,7 +635,7 @@ impl Window {
             .title("Search")
             .icon_name("system-search-symbolic")
             .build();
-        let locations=adw::PreferencesGroup::builder().title("Search Locations").description("Changes are saved automatically. GSeek uses GNOME LocalSearch. Only files in both these folders and GNOME’s search locations are discovered. Hidden folders, credentials, caches, and build outputs are excluded.").build();
+        let locations=adw::PreferencesGroup::builder().title("Content Search Folders").description("Embed content from these folders in GNOME’s search locations. Other files remain searchable by name. Hidden files, credentials, caches, and build outputs are excluded.").build();
         let folder_list = gtk::ListBox::new();
         folder_list.add_css_class("boxed-list");
         folder_list.set_selection_mode(gtk::SelectionMode::None);
@@ -1187,15 +1223,27 @@ mod tests {
         }
         close_dialog(&ui.window);
         ui.setup();
-        until(|| ui.window.visible_dialog().is_some());
+        assert!(ui.window.visible_dialog().is_none());
+        assert_eq!(ui.main_stack.visible_child_name().as_deref(), Some("setup"));
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(400));
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("setup.png"));
         }
-        close_dialog(&ui.window);
         ui.window.set_default_size(390, 700);
         until(|| ui.window.width() <= 400);
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("setup-narrow.png"));
+        }
+        ui.main_stack.set_visible_child_name("welcome");
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("welcome-narrow.png"));
+        }
+        ui.main_stack.set_visible_child_name("library");
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(300));
         if let Some(dir) = &output {
