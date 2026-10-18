@@ -121,3 +121,15 @@ The design follows the GNOME HIG source (cloned and read for these changes):
 [boxed lists](https://developer.gnome.org/hig/patterns/containers/boxed-lists.html),
 [writing style](https://developer.gnome.org/hig/guidelines/writing-style.html), and
 [adaptiveness](https://developer.gnome.org/hig/guidelines/adaptive.html).
+
+GNOME’s `LaunchSearch` passes the overview query to `gseek results`. GApplication
+forwards command lines to the existing primary window; results use GTK SearchEntry,
+ListView/NoSelection and a virtualized factory. Generation checks discard stale
+responses. Empty, pending and failed queries use AdwStatusPage. The search worker
+keeps semantic results when filename lookup fails, exposing a separate status
+warning. LocalSearch FTS word-prefix candidates are paged until enough eligible
+results survive the same exclusion policy.
+
+Default exclusion constants are shared by validation and visible preferences.
+Backend labels come from the selected device and offload report in that worker’s
+upstream startup log; software Vulkan devices are identified as CPU execution.

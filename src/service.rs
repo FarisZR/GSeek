@@ -29,6 +29,7 @@ const CONTROL_XML: &str = include_str!("../data/service.xml");
 #[serde(default)]
 pub struct Status {
     pub discovery_error: String,
+    pub filename_error: String,
     pub discovering: bool,
     pub state: String,
     pub detail: String,
@@ -132,7 +133,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let worker_paths = paths.clone();
     let worker_state = shared.clone();
     let work = WorkControl::default();
-    let search = Rc::new(SearchQueue::new(&paths, work.clone()));
+    let search = Rc::new(SearchQueue::new(&paths, work.clone(), shared.clone()));
     let worker_control = work.clone();
     let subscriptions = Rc::new(std::cell::RefCell::new(Vec::new()));
     let live_subscriptions = subscriptions.clone();
@@ -224,12 +225,14 @@ pub fn run(paths: Paths) -> Result<()> {
                                 invocation.return_value(None);
                             }
                             "LaunchSearch" => {
-                                let (_terms, _) = parameters
+                                let (terms, _) = parameters
                                     .get::<(Vec<String>, u32)>()
                                     .context("Invalid search")?;
                                 let launcher = launcher()?;
-                                // Activities owns search; the app provides setup and indexing controls.
-                                std::process::Command::new(launcher).spawn()?;
+                                std::process::Command::new(launcher)
+                                    .arg("results")
+                                    .arg(terms.join(" "))
+                                    .spawn()?;
                                 invocation.return_value(None);
                             }
                             _ => bail!("Unknown search-provider method"),
@@ -517,7 +520,7 @@ struct SearchQueue {
     ui: Arc<AtomicU64>,
 }
 impl SearchQueue {
-    fn new(paths: &Paths, work: WorkControl) -> Self {
+    fn new(paths: &Paths, work: WorkControl, shared: Shared) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<SearchJob>(32);
         let paths = paths.clone();
         let shell = Arc::new(AtomicU64::new(0));
@@ -571,8 +574,18 @@ impl SearchQueue {
                     )?;
                     // LocalSearch remains the authority for ordinary filename results,
                     // including Downloads and formats without a content reader.
-                    let files = discovery::filename_matches(&job.query, &settings)?;
-                    crate::store::merge_filename_matches(&mut hits, files, &job.query, job.limit);
+                    match discovery::filename_matches(&job.query, &settings, job.limit) {
+                        Ok(files) => {
+                            shared.lock().unwrap().filename_error.clear();
+                            crate::store::merge_filename_matches(
+                                &mut hits, files, &job.query, job.limit,
+                            );
+                        }
+                        Err(e) => {
+                            shared.lock().unwrap().filename_error =
+                                format!("GNOME filename search unavailable: {e:#}");
+                        }
+                    }
                     Ok(hits)
                 })()
                 .map_err(|e| format!("{e:#}"));
@@ -596,7 +609,7 @@ impl SearchQueue {
         self.sender
             .try_send(SearchJob {
                 query,
-                limit: limit.clamp(1, 200),
+                limit: limit.clamp(1, crate::store::MAX_RESULTS),
                 generation,
                 shell,
                 reply,

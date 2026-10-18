@@ -16,6 +16,12 @@ use std::{
 struct Window {
     window: adw::ApplicationWindow,
     main_stack: gtk::Stack,
+    search_entry: gtk::SearchEntry,
+    search_results: gio::ListStore,
+    search_content: gtk::Stack,
+    search_placeholder: adw::StatusPage,
+    search_status: gtk::Label,
+    search_generation: Cell<u64>,
     banner: adw::Banner,
     status_title: gtk::Label,
     status_detail: gtk::Label,
@@ -39,8 +45,11 @@ struct SettingsWrite {
     complete: Option<Box<dyn FnOnce(bool)>>,
 }
 
-pub fn run(paths: Paths) -> Result<()> {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
     let current: Rc<RefCell<Option<Rc<Window>>>> = Rc::new(RefCell::new(None));
     let state = current.clone();
     let app_paths = paths.clone();
@@ -65,7 +74,49 @@ pub fn run(paths: Paths) -> Result<()> {
         });
         *state.borrow_mut() = Some(ui);
     });
-    let exit = app.run_with_args(&["gseek"]);
+    let state = current.clone();
+    let search = gio::SimpleAction::new_stateful(
+        "search",
+        Some(&String::static_variant_type()),
+        &"".to_variant(),
+    );
+    let weak_app = app.downgrade();
+    search.connect_activate(move |action, value| {
+        if let Some(query) = value.and_then(|v| v.str())
+            && let Some(app) = weak_app.upgrade()
+        {
+            app.activate();
+            action.set_state(&query.to_variant());
+            if let Some(ui) = state.borrow().as_ref() {
+                ui.show_results(query);
+            }
+        }
+    });
+    app.add_action(&search);
+    let quit = gio::SimpleAction::new("quit", None);
+    let weak_app = app.downgrade();
+    let state = current.clone();
+    quit.connect_activate(move |_, _| {
+        if let Some(ui) = state.borrow().as_ref() {
+            ui.window.close();
+        } else if let Some(app) = weak_app.upgrade() {
+            app.quit();
+        }
+    });
+    app.add_action(&quit);
+    app.set_accels_for_action("app.quit", &["<Primary>q", "<Primary>w"]);
+    app.connect_command_line(|app, command| {
+        if let Some(query) = command.arguments().get(1) {
+            app.activate_action("search", Some(&query.to_string_lossy().to_variant()));
+        } else {
+            app.activate();
+        }
+        glib::ExitCode::SUCCESS
+    });
+    let arguments = std::iter::once("gseek".to_owned())
+        .chain(query)
+        .collect::<Vec<_>>();
+    let exit = app.run_with_args(&arguments);
     if exit != glib::ExitCode::SUCCESS {
         anyhow::bail!("Application exited with {exit:?}");
     }
@@ -108,6 +159,8 @@ impl Window {
         let header = adw::HeaderBar::new();
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("app.preferences"));
+        menu.append(Some("Search Files"), Some("app.results"));
+        menu.append(Some("Indexing & Activity"), Some("app.activity"));
         menu.append(Some("About GSeek"), Some("app.about"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -220,13 +273,93 @@ impl Window {
             .build();
         body.append(&activity_clamp);
         let back_stack = main_stack.clone();
-        back.connect_clicked(move |_| back_stack.set_visible_child_name("welcome"));
-        main_stack.connect_visible_child_name_notify(move |stack| {
-            back.set_visible(stack.visible_child_name().as_deref() == Some("setup"));
+        let back_paths = paths.clone();
+        back.connect_clicked(move |_| {
+            back_stack.set_visible_child_name(if back_paths.load().is_ok_and(|s| s.configured) {
+                "library"
+            } else {
+                "welcome"
+            })
         });
+        main_stack.connect_visible_child_name_notify(move |stack| {
+            back.set_visible(matches!(
+                stack.visible_child_name().as_deref(),
+                Some("setup" | "results")
+            ));
+        });
+        let search_box = vertical(16);
+        margins(&search_box, 24);
+        let search_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Search Files")
+            .hexpand(true)
+            .build();
+        search_box.append(&search_entry);
+        let search_status = label("Enter a filename or describe its contents", "dim-label");
+        search_status.set_xalign(0.0);
+        search_box.append(&search_status);
+        let search_results = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_bind(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let object = item
+                .item()
+                .unwrap()
+                .downcast::<glib::BoxedAnyObject>()
+                .unwrap();
+            let hit = object.borrow::<crate::store::SearchHit>();
+            let subtitle = if hit.snippet.is_empty() {
+                hit.path
+                    .parent()
+                    .unwrap_or(&hit.path)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                hit.snippet.clone()
+            };
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&hit.name))
+                .subtitle(glib::markup_escape_text(&subtitle))
+                .build();
+            row.set_title_lines(1);
+            row.set_subtitle_lines(2);
+            let image = gtk::Image::from_gicon(&integration::icon_for(&hit.path, &hit.mime));
+            image.set_pixel_size(32);
+            row.add_prefix(&image);
+            item.set_child(Some(&row));
+        });
+        let selection = gtk::NoSelection::new(Some(search_results.clone()));
+        let result_list = gtk::ListView::new(Some(selection), Some(factory));
+        result_list.add_css_class("boxed-list");
+        result_list.set_single_click_activate(true);
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&result_list)
+            .build();
+        let search_content = gtk::Stack::new();
+        let search_placeholder = adw::StatusPage::builder()
+            .icon_name("system-search-symbolic")
+            .title("Search Files")
+            .description("Enter a filename or describe its contents")
+            .vexpand(true)
+            .build();
+        search_content.add_named(&search_placeholder, Some("empty"));
+        search_content.add_named(&scroll, Some("results"));
+        search_box.append(&search_content);
+        let search_clamp = adw::Clamp::builder()
+            .maximum_size(800)
+            .child(&search_box)
+            .build();
+        main_stack.add_named(&search_clamp, Some("results"));
         let ui = Rc::new(Self {
             window,
             main_stack,
+            search_entry,
+            search_results,
+            search_content,
+            search_placeholder,
+            search_status,
+            search_generation: Cell::new(0),
             banner,
             status_title,
             status_detail,
@@ -243,6 +376,48 @@ impl Window {
             refreshing: Cell::new(false),
             paths,
         });
+        let weak = Rc::downgrade(&ui);
+        result_list.connect_activate(move |_, position| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(item) = ui.search_results.item(position)
+            {
+                let object = item.downcast::<glib::BoxedAnyObject>().unwrap();
+                let hit = object.borrow::<crate::store::SearchHit>();
+                if let Err(e) = integration::open_result(&ui.paths, &hit.uri) {
+                    ui.error(&format!("{e:#}"));
+                }
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.search_entry.connect_search_changed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.search_files();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.search_entry.connect_activate(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.search_files();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        let results = gio::SimpleAction::new("results", None);
+        results.connect_activate(move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.show_results(&ui.search_entry.text());
+            }
+        });
+        app.add_action(&results);
+        app.set_accels_for_action("app.results", &["<Primary>f"]);
+        let weak = Rc::downgrade(&ui);
+        let activity = gio::SimpleAction::new("activity", None);
+        activity.connect_activate(move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.main_stack.set_visible_child_name("library");
+                ui.refresh();
+            }
+        });
+        app.add_action(&activity);
 
         let weak = Rc::downgrade(&ui);
         start.connect_clicked(move |_| {
@@ -289,6 +464,85 @@ impl Window {
         ui
     }
 
+    fn show_results(self: &Rc<Self>, query: &str) {
+        self.main_stack.set_visible_child_name("results");
+        if self.search_entry.text() == query {
+            self.search_files();
+        } else {
+            self.search_entry.set_text(query);
+        }
+        self.search_entry.grab_focus();
+        self.window.present();
+    }
+
+    fn search_files(self: &Rc<Self>) {
+        let query = self.search_entry.text().trim().to_owned();
+        let generation = self.search_generation.get().wrapping_add(1);
+        self.search_generation.set(generation);
+        self.search_results.remove_all();
+        self.search_content.set_visible_child_name("empty");
+        self.search_status
+            .set_text("Includes content matches and standard GNOME filename results");
+        if query.is_empty() {
+            self.search_placeholder.set_title("Search Files");
+            self.search_placeholder
+                .set_description(Some("Enter a filename or describe its contents"));
+            return;
+        }
+        self.search_placeholder.set_title("Searching…");
+        self.search_placeholder.set_description(None);
+        let weak = Rc::downgrade(self);
+        let requested = query.clone();
+        spawn(
+            move || -> Result<_> {
+                let hits = service::search(&requested, crate::store::MAX_RESULTS as u32)?;
+                let warning = service::read_status()
+                    .map(|s| s.filename_error)
+                    .unwrap_or_default();
+                Ok((hits, warning))
+            },
+            move |result| {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if ui.search_generation.get() != generation
+                    || ui.search_entry.text().trim() != query
+                {
+                    return;
+                }
+                match result {
+                    Ok((hits, warning)) if hits.is_empty() => {
+                        ui.search_placeholder.set_title("No Results");
+                        ui.search_placeholder
+                            .set_description(Some(if warning.is_empty() {
+                                "Try another filename or description"
+                            } else {
+                                &warning
+                            }));
+                    }
+                    Ok((hits, warning)) => {
+                        ui.search_status.set_text(&if hits.len() == crate::store::MAX_RESULTS {
+                        "Showing the first 5000 matches · Refine the search for more specific results".into()
+                    } else { format!("{} results · Includes standard GNOME filename matches", hits.len()) });
+                        if !warning.is_empty() {
+                            ui.search_status
+                                .set_text(&format!("{} results · {warning}", hits.len()));
+                        }
+                        for hit in hits {
+                            ui.search_results.append(&glib::BoxedAnyObject::new(hit));
+                        }
+                        ui.search_content.set_visible_child_name("results");
+                    }
+                    Err(e) => {
+                        ui.search_placeholder.set_title("Search Unavailable");
+                        ui.search_placeholder
+                            .set_description(Some(&format!("{e:#}")));
+                    }
+                }
+            },
+        );
+    }
+
     fn error(&self, message: &str) {
         let dialog = adw::AlertDialog::builder()
             .heading("GSeek needs your attention")
@@ -326,7 +580,10 @@ impl Window {
                 match result {
                     Ok(s) => {
                         let configured = ui.paths.load().map(|s| s.configured).unwrap_or(false);
-                        if ui.main_stack.visible_child_name().as_deref() != Some("setup") {
+                        if !matches!(
+                            ui.main_stack.visible_child_name().as_deref(),
+                            Some("setup" | "results")
+                        ) {
                             ui.main_stack.set_visible_child_name(
                                 if configured || s.state == "setup" || s.state == "error" {
                                     "library"
@@ -540,6 +797,7 @@ impl Window {
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folders, &draft, false, self);
         content.append(&locations);
+        content.append(&default_exclusions_group());
         content.append(&reader_status_group());
         let group = adw::PreferencesGroup::new();
         let replace = adw::SwitchRow::builder()
@@ -671,6 +929,7 @@ impl Window {
         exclusions.set_header_suffix(Some(&exclude));
         connect_folder_picker(&exclude, &self.window, &exclude_list, &draft, true, self);
         page.add(&exclusions);
+        page.add(&default_exclusions_group());
         let types = adw::PreferencesGroup::builder().title("Content").build();
         let images = adw::SwitchRow::builder()
             .title("Images and Screenshots")
@@ -926,6 +1185,47 @@ fn clear_list(list: &gtk::ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
+}
+
+fn default_exclusions_group() -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    let defaults = adw::ExpanderRow::builder()
+        .title("Default Exclusions")
+        .subtitle("Hidden files, credentials, encryption keys, and generated folders")
+        .build();
+    for (title, detail) in [
+        (
+            "Hidden Files and Folders",
+            "Names beginning with a dot, including .env, .ssh, and .git".into(),
+        ),
+        (
+            "Security File Extensions",
+            crate::config::SENSITIVE_EXTENSIONS
+                .iter()
+                .map(|s| format!(".{s}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        (
+            "Credential Filenames",
+            crate::config::SENSITIVE_FILENAMES.join(", "),
+        ),
+        (
+            "Generated Folders",
+            crate::config::GENERATED_DIRECTORIES.join(", "),
+        ),
+    ] {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(glib::markup_escape_text(&detail))
+            .build();
+        defaults.add_row(&row);
+    }
+    group.add(&defaults);
+    let names = adw::ActionRow::builder().title("Standard GNOME File Results")
+        .subtitle("Filename matches are included even outside content search folders, including Downloads. Exclusions apply to all results.").build();
+    group.add(&names);
+    group
 }
 
 fn fill_folders(
@@ -1222,6 +1522,46 @@ mod tests {
             until(|| ui.backend.text() == "Backend: CPU");
         }
         close_dialog(&ui.window);
+        ui.show_results("Show All Results");
+        until(|| ui.search_results.n_items() >= 7);
+        assert_eq!(
+            (0..ui.search_results.n_items())
+                .filter(|i| {
+                    ui.search_results
+                        .item(*i)
+                        .unwrap()
+                        .downcast::<glib::BoxedAnyObject>()
+                        .unwrap()
+                        .borrow::<crate::store::SearchHit>()
+                        .name
+                        .starts_with("Show All Results")
+                })
+                .count(),
+            7
+        );
+        assert_eq!(
+            ui.search_content.visible_child_name().as_deref(),
+            Some("results")
+        );
+        let frame = Instant::now();
+        until(|| frame.elapsed() > Duration::from_millis(300));
+        if let Some(dir) = &output {
+            capture(&ui.window, &dir.join("results.png"));
+        }
+        ui.show_results("Rental Agreement");
+        until(|| ui.search_results.n_items() > 0 && ui.search_generation.get() > 1);
+        let item = ui
+            .search_results
+            .item(0)
+            .unwrap()
+            .downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        assert_eq!(
+            item.borrow::<crate::store::SearchHit>().name,
+            "Rental Agreement.txt"
+        );
+        ui.show_results("");
+        until(|| ui.search_results.n_items() == 0);
         ui.setup();
         assert!(ui.window.visible_dialog().is_none());
         assert_eq!(ui.main_stack.visible_child_name().as_deref(), Some("setup"));

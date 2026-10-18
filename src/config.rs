@@ -6,6 +6,34 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const SENSITIVE_EXTENSIONS: &[&str] = &[
+    "key", "pem", "p12", "pfx", "kdbx", "gpg", "pgp", "asc", "age", "keystore", "jks", "kdb",
+    "der", "crt", "cer", "psafe3", "ibak",
+];
+pub const SENSITIVE_FILENAMES: &[&str] = &[
+    "credentials",
+    "credentials.json",
+    "secrets.json",
+    "passwords.txt",
+    "id_rsa",
+    "id_ed25519",
+    "id_dsa",
+    "id_ecdsa",
+    "authorized_keys",
+    "known_hosts",
+];
+pub const GENERATED_DIRECTORIES: &[&str] = &[
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "vendor",
+    "venv",
+    "__pycache__",
+    "containers",
+    "lost+found",
+];
+
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub data: PathBuf,
@@ -254,19 +282,7 @@ impl Settings {
         !self.excluded_folders.iter().any(|p| path.starts_with(p))
             && !path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
-                s.starts_with('.')
-                    || matches!(
-                        s.as_ref(),
-                        "node_modules"
-                            | "target"
-                            | "build"
-                            | "dist"
-                            | "vendor"
-                            | "venv"
-                            | "__pycache__"
-                            | "containers"
-                            | "lost+found"
-                    )
+                s.starts_with('.') || GENERATED_DIRECTORIES.contains(&s.as_ref())
             })
             && !self.excluded_extensions.iter().any(|ext| {
                 path.extension().is_some_and(|e| {
@@ -284,40 +300,15 @@ fn sensitive(path: &Path) -> bool {
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
-    matches!(
-        name.as_str(),
-        "credentials"
-            | "credentials.json"
-            | "secrets.json"
-            | "passwords.txt"
-            | "id_rsa"
-            | "id_ed25519"
-            | "id_dsa"
-            | "id_ecdsa"
-            | "authorized_keys"
-            | "known_hosts"
-    ) || matches!(
-        path.extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-            .as_str(),
-        "key"
-            | "pem"
-            | "p12"
-            | "pfx"
-            | "kdbx"
-            | "gpg"
-            | "pgp"
-            | "asc"
-            | "age"
-            | "keystore"
-            | "jks"
-            | "kdb"
-            | "der"
-            | "crt"
-            | "cer"
-    )
+    SENSITIVE_FILENAMES.contains(&name.as_str())
+        || SENSITIVE_EXTENSIONS.contains(
+            &path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str(),
+        )
 }
 
 #[cfg(test)]
@@ -341,6 +332,8 @@ mod tests {
             "/home/test/Documents/encryption.age",
             "/home/test/Documents/id_ecdsa",
             "/home/test/Documents/secret.key",
+            "/home/test/Downloads/passwords.psafe3",
+            "/home/test/Downloads/passwords.IBAK",
         ] {
             assert!(!settings.allows_filename(Path::new(path)), "{path}");
             assert!(!settings.allows(Path::new(path)), "{path}");

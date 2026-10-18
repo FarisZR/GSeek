@@ -269,7 +269,11 @@ pub fn icon_for(path: &Path, mime: &str) -> gio::Icon {
 
 pub fn open_result(paths: &Paths, uri: &str) -> Result<()> {
     let settings = paths.load()?;
-    if crate::discovery::indexed_search_record(uri, &settings)?.is_none() {
+    let stored = crate::store::Store::open(&paths.database())?
+        .file(uri)?
+        .is_some()
+        && crate::discovery::record_from_uri(uri, &settings)?.is_some();
+    if !stored && crate::discovery::indexed_search_record(uri, &settings)?.is_none() {
         bail!("This result moved or is outside your search locations");
     }
     gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>)?;
