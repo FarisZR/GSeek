@@ -103,6 +103,24 @@ fn text_matches_pinned_reference_vector() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Uses the real tokenizer and model to exercise dense input beyond both runtime budgets"]
+fn dense_unicode_documents_and_long_queries_fit_the_runtime() -> Result<()> {
+    let paths = Paths::from_env();
+    paths.init()?;
+    gseek::model::ensure(&paths, |_, _, _| Ok(()))?;
+    let settings = paths.load()?;
+    let dense = "1234567890🧬測試العربية".repeat(160);
+    let input = gseek::extract::text_document("Dense.txt", &dense);
+    let mut runtime = Runtime::new(&paths, &settings, false);
+    validate_vector(&runtime.embed(&input)?)?;
+    runtime.validate()?;
+    let mut query = Runtime::new(&paths, &settings, true);
+    validate_vector(&query.query(&dense)?)?;
+    query.validate()?;
+    Ok(())
+}
+
+#[test]
 #[ignore = "Uses the real image/audio encoders and FFmpeg"]
 fn multimodal_vectors_share_one_space() -> Result<()> {
     let paths = Paths::from_env();

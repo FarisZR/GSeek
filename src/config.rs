@@ -163,7 +163,6 @@ impl Default for Settings {
         // GLib honours translated XDG user directories. Never fall back to the entire home folder.
         let folders = [
             glib::UserDirectory::Documents,
-            glib::UserDirectory::Downloads,
             glib::UserDirectory::Desktop,
             glib::UserDirectory::Pictures,
             glib::UserDirectory::Music,
@@ -246,8 +245,13 @@ impl Settings {
     }
 
     pub fn allows(&self, path: &Path) -> bool {
-        self.folders.iter().any(|p| path.starts_with(p))
-            && !self.excluded_folders.iter().any(|p| path.starts_with(p))
+        self.folders.iter().any(|p| path.starts_with(p)) && self.allows_filename(path)
+    }
+
+    /// Filename search follows LocalSearch's scope, without reading file contents.
+    /// Explicit exclusions and privacy rules apply to both kinds of results.
+    pub fn allows_filename(&self, path: &Path) -> bool {
+        !self.excluded_folders.iter().any(|p| path.starts_with(p))
             && !path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
                 s.starts_with('.')
@@ -288,19 +292,60 @@ fn sensitive(path: &Path) -> bool {
             | "passwords.txt"
             | "id_rsa"
             | "id_ed25519"
+            | "id_dsa"
+            | "id_ecdsa"
+            | "authorized_keys"
+            | "known_hosts"
     ) || matches!(
         path.extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase()
             .as_str(),
-        "key" | "pem" | "p12" | "pfx" | "kdbx" | "gpg"
+        "key"
+            | "pem"
+            | "p12"
+            | "pfx"
+            | "kdbx"
+            | "gpg"
+            | "pgp"
+            | "asc"
+            | "age"
+            | "keystore"
+            | "jks"
+            | "kdb"
+            | "der"
+            | "crt"
+            | "cer"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn defaults_keep_downloads_out_of_content_search() {
+        let settings = Settings::default();
+        if let Some(downloads) = glib::user_special_dir(glib::UserDirectory::Downloads) {
+            assert!(!settings.folders.contains(&downloads));
+        }
+        let settings = Settings {
+            folders: vec!["/home/test/Documents".into()],
+            ..settings
+        };
+        assert!(!settings.allows(Path::new("/home/test/Downloads/invoice.pdf")));
+        assert!(settings.allows_filename(Path::new("/home/test/Downloads/invoice.pdf")));
+        for path in [
+            "/home/test/Downloads/.hidden.txt",
+            "/home/test/Downloads/backup.gpg",
+            "/home/test/Documents/encryption.age",
+            "/home/test/Documents/id_ecdsa",
+            "/home/test/Documents/secret.key",
+        ] {
+            assert!(!settings.allows_filename(Path::new(path)), "{path}");
+            assert!(!settings.allows(Path::new(path)), "{path}");
+        }
+    }
     #[test]
     fn preference_patches_preserve_other_changes_and_validate_before_saving() -> Result<()> {
         let initial = Settings::default();

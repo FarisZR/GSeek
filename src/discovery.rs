@@ -157,6 +157,7 @@ fn read_query(
     connection: &glib::Object,
     query: &str,
     settings: &Settings,
+    content_scope: bool,
 ) -> Result<(Vec<FileRecord>, String, usize)> {
     let query = CString::new(query)?;
     let mut error = ptr::null_mut();
@@ -205,7 +206,12 @@ fn read_query(
             .into_owned();
         after = uri.clone();
         read += 1;
-        if let Some(mut record) = record_from_uri(&uri, settings)? {
+        let record = if content_scope {
+            record_from_uri(&uri, settings)?
+        } else {
+            record_for_search(&uri, settings)?
+        };
+        if let Some(mut record) = record {
             let id = unsafe { (api.string_at)(cursor, 1, ptr::null_mut()) };
             if id.is_null() {
                 bail!("LocalSearch returned no resource ID");
@@ -240,6 +246,7 @@ pub fn reconcile(
             &connection,
             &discovery_query(settings, &after),
             settings,
+            true,
         )?;
         after = last;
         count += records.len();
@@ -266,19 +273,72 @@ pub fn changed(settings: &Settings, ids: &[i64]) -> Result<Vec<FileRecord>> {
             continue;
         }
         let query = query_for(settings, &format!("tracker:id(?f) IN ({ids})"), false);
-        records.extend(read_query(api, &connection, &query, settings)?.0);
+        records.extend(read_query(api, &connection, &query, settings, true)?.0);
     }
     Ok(records)
 }
 
 pub fn record_from_uri(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {
+    record_checked(uri, |path| settings.allows(path))
+}
+
+pub fn record_for_search(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {
+    record_checked(uri, |path| settings.allows_filename(path))
+}
+
+/// Read GNOME's filename index directly. These records never enter GSeek's
+/// embedding queue, vector database, or content readers.
+pub fn filename_matches(query: &str, settings: &Settings) -> Result<Vec<FileRecord>> {
+    let terms: Vec<_> = query.split_whitespace().take(32).collect();
+    if terms.is_empty() {
+        return Ok(vec![]);
+    }
+    let filter = terms
+        .into_iter()
+        .map(|t| {
+            format!(
+                "CONTAINS(LCASE(nfo:fileName(?f)), LCASE({}))",
+                sparql_string(t)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    filename_records(&filter, settings)
+}
+
+pub fn indexed_search_record(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {
+    if record_for_search(uri, settings)?.is_none() {
+        return Ok(None);
+    }
+    Ok(
+        filename_records(&format!("?url = {}", sparql_string(uri)), settings)?
+            .into_iter()
+            .next(),
+    )
+}
+
+fn filename_records(filter: &str, settings: &Settings) -> Result<Vec<FileRecord>> {
+    let api = Api::load()?;
+    let connection = connect(api)?;
+    let query = format!(
+        "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
+        PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
+        PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
+        SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
+        GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
+        FILTER ({filter}) }} ORDER BY ?url LIMIT 500"
+    );
+    Ok(read_query(api, &connection, &query, settings, false)?.0)
+}
+
+fn record_checked(uri: &str, allowed: impl Fn(&Path) -> bool) -> Result<Option<FileRecord>> {
     let Ok(url) = url::Url::parse(uri) else {
         return Ok(None);
     };
     let Ok(path) = url.to_file_path() else {
         return Ok(None);
     };
-    if !settings.allows(&path) {
+    if !allowed(&path) {
         return Ok(None);
     }
     let meta = match fs::symlink_metadata(&path) {
@@ -308,7 +368,7 @@ pub fn record_from_uri(uri: &str, settings: &Settings) -> Result<Option<FileReco
         }
         Err(e) => return Err(e.into()),
     };
-    if !settings.allows(&canonical) {
+    if !allowed(&canonical) {
         return Ok(None);
     }
     let (content_type, _) = gio::content_type_guess(Some(&path), None::<&[u8]>);

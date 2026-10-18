@@ -42,10 +42,14 @@ Homebrew installs the app, desktop entry, background activation,
 and search provider. It asks for administrator permission to place the small
 provider registration in GNOME’s system data directory.
 
-1. Open **GSeek** from the app menu and select **Set Up Search**.
-2. Pick your folders. They must also be enabled in **GNOME Settings → Search → Search Locations**; GSeek uses LocalSearch’s existing discovery index.
+<p align="center"><img src="docs/screenshots/welcome.png" width="640" alt="GSeek welcome page with a centered setup checklist."></p>
+
+1. Open **GSeek** from the app menu and select **Choose Folders**.
+2. Choose folders to embed. Downloads is not selected by default. They must also be enabled in **GNOME Settings → Search → Search Locations**; GSeek uses LocalSearch’s existing discovery index.
 3. Choose **Download & Start**. The verified model downloads once, about **865 MB**, along with the selected upstream runtime.
 4. Search from Activities. Setup enables GSeek and disables the Files search provider after inference is ready.
+
+<p align="center"><img src="docs/screenshots/setup.png" width="640" alt="Set Up GSeek in the main window, with folder selection and Download & Start."></p>
 
 There is no inference server or SDK to install. Closing the window keeps indexing
 and overview search running. Update with `brew upgrade --cask gseek`.
@@ -94,6 +98,11 @@ preferences show the backend Automatic actually selected. Switching backends
 interrupts the previous worker, reports download/startup progress, and preserves
 an explicit choice if its driver or memory allocation fails.
 
+GSeek also queries GNOME’s filename index directly, including Downloads and
+formats without a content reader. These files stay out of the embedding queue;
+they appear in Activities without enabling a second Files provider. Explicit
+folder and extension exclusions apply to all GSeek results.
+
 LocalSearch notifications pick up new, changed, renamed, and deleted files.
 Periodic reconciliation repairs missed events. Content hashes reuse embeddings
 for unchanged files and renames. Each document or media part is checkpointed,
@@ -140,7 +149,7 @@ and recovery controls; it does not quietly turn into filename-only search.
 
 PDF text and visual pages, plain-text formats, DOCX, ODT, images, audio, and video
 are supported. Audio uses overlapping 30-second windows every 25 seconds; video frames every
-10 seconds. Limits bound very large inputs; Activity explains skipped files.
+10 seconds. Text is split using the model’s tokenizer when it exceeds the runtime’s input budget; no text is discarded. Activity explains files that cannot be embedded.
 Results retain page or timestamp context but open in the default app, without
 promising page seeking across unrelated viewers.
 

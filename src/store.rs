@@ -654,6 +654,37 @@ fn hit_row(
         score,
     })
 }
+
+pub fn merge_filename_matches(
+    hits: &mut Vec<SearchHit>,
+    files: Vec<FileRecord>,
+    query: &str,
+    limit: usize,
+) {
+    let query = folded(query.trim());
+    for file in files {
+        if hits.iter().any(|hit| hit.uri == file.uri) {
+            continue;
+        }
+        let score = if folded(&file.name) == query {
+            5.0
+        } else {
+            3.0
+        };
+        hits.push(SearchHit {
+            uri: file.uri,
+            path: file.path,
+            name: file.name,
+            mime: file.mime,
+            snippet: String::new(),
+            page: None,
+            seconds: None,
+            score,
+        });
+    }
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
+    hits.truncate(limit.clamp(1, 200));
+}
 fn keep_hit(hits: &mut HashMap<String, SearchHit>, h: SearchHit, settings: &Settings) {
     if !settings.allows(&h.path) || !h.path.exists() {
         return;
