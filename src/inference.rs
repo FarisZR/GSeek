@@ -666,6 +666,19 @@ mod tests {
             text: "task: search result | query: the clause about pets in the lease".into(),
         };
         let expected = runtime.embed(&input)?;
+        // Keep the queue regression fixture above the index worker's 2,048-token
+        // budget even if upstream changes how numeric text is tokenized.
+        let queue_fixture = format!("title: none | text: {}", "1234567890".repeat(230));
+        let count = runtime
+            .worker
+            .as_ref()
+            .unwrap()
+            .tokenize(&queue_fixture)?
+            .len();
+        assert!(
+            count > 2048 && count < 2500,
+            "Queue fixture has {count} tokens"
+        );
         let pid = runtime.worker.as_ref().unwrap().child.lock().unwrap().id();
         let error = runtime
             .worker

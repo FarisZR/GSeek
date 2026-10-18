@@ -274,8 +274,10 @@ class EndToEnd(unittest.TestCase):
             wait_for(lambda: self.status()["counts"]["pending"] == 0)
 
     def test_05c_dense_input_finishes_without_stopping_indexing(self):
-        dense = self.docs / "Dense Unicode.txt"
-        dense.write_text("1234567890🧬測試العربية" * 160)
+        dense = self.docs / "Dense Input.txt"
+        # Reproduce the 2,048-token boundary without duplicating the much larger
+        # multilingual/long-query stress test in real_inference.rs.
+        dense.write_text("1234567890" * 230)
         self.add(dense)
         def indexed():
             with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
@@ -284,7 +286,7 @@ class EndToEnd(unittest.TestCase):
         try:
             wait_for(indexed)
             self.assertTrue(self.status()["ready"])
-            self.assertEqual(self.search("Dense Unicode.txt")[0]["uri"], dense.as_uri())
+            self.assertEqual(self.search("Dense Input.txt")[0]["uri"], dense.as_uri())
         finally:
             self.remove(dense)
             dense.unlink()
