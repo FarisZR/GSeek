@@ -23,3 +23,9 @@ GNOME integration.
 
 Rust dependency licenses and versions are recorded in Cargo.lock and their
 published crates. Release CI produces a dependency license inventory.
+
+UI symbolic icons are unmodified artwork from the [GNOME Project](https://www.gnome.org),
+[Adwaita icon theme 51.0](https://gitlab.gnome.org/GNOME/adwaita-icon-theme/-/tree/51.0)
+(commit `70ecd52fbe844304ed4f845a04a1757fa6284884`). GSeek distributes them under
+LGPL-3.0; the license is in `data/icons/COPYING-LGPL-3.0` and in release
+archives at `gseek/licenses/Adwaita-LGPL-3.0`.

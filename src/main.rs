@@ -29,6 +29,8 @@ enum Action {
     Search { query: String },
     /// Show all matching files in the native results view.
     Results { query: String },
+    /// Restart the installed app and its background search service.
+    Restart,
     /// Verify/download the pinned model (for CI and diagnostics).
     PrepareModel,
     /// Test real local inference without a desktop session.
@@ -53,15 +55,14 @@ fn run() -> Result<()> {
     match args.command {
         Some(Action::Service) => service::run(paths),
         Some(Action::Integrate { launcher }) => {
-            service::stop_running();
             let launcher = match launcher {
                 Some(path) => path,
                 None => service::launcher()?,
             };
-            gseek::integration::install(&paths, &launcher)
+            gseek::lifecycle::integrate(&paths, &launcher)
         }
         Some(Action::Unintegrate) => {
-            service::stop_running();
+            service::stop_running()?;
             gseek::integration::uninstall(&paths)
         }
         Some(Action::Status) => {
@@ -79,6 +80,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some(Action::Results { query }) => open_ui(paths, Some(query)),
+        Some(Action::Restart) => gseek::lifecycle::restart(&paths),
         Some(Action::PrepareModel) => gseek::model::ensure(&paths, |_, _, _| Ok(())),
         Some(Action::Embed { text, image, audio }) => {
             let settings = paths.load()?;

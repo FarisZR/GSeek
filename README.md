@@ -52,7 +52,10 @@ provider registration in GNOME’s system data directory.
 <p align="center"><img src="docs/screenshots/setup.png" width="640" alt="Set Up GSeek in the main window, with folder selection and Download & Start."></p>
 
 There is no inference server or SDK to install. Closing the window keeps indexing
-and overview search running. Update with `brew upgrade --cask gseek`.
+and overview search running. Update with `brew upgrade --cask gseek`. Upgrades
+restart the background service and reopen an existing GSeek window automatically.
+You can also choose **Restart GSeek** from the main menu or run `gseek restart`.
+Your settings and indexed files are preserved.
 
 Uninstalling with `brew uninstall --cask gseek` removes desktop integration and
 restores the Files provider’s previous setting. Your local library and settings

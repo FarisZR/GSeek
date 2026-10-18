@@ -170,6 +170,7 @@ impl Window {
         menu.append(Some("Preferences"), Some("app.preferences"));
         menu.append(Some("Search Files"), Some("app.results"));
         menu.append(Some("Indexing & Activity"), Some("app.activity"));
+        menu.append(Some("Restart GSeek"), Some("app.restart"));
         menu.append(Some("About GSeek"), Some("app.about"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -469,6 +470,37 @@ impl Window {
             }
         });
         app.add_action(&preferences);
+        let restart = gio::SimpleAction::new("restart", None);
+        let weak = Rc::downgrade(&ui);
+        restart.connect_activate(move |action, _| {
+            action.set_enabled(false);
+            let weak = weak.clone();
+            let action = action.clone();
+            // The helper waits for this application to release its bus name before
+            // launching the stable installed path. Keep GTK free to save and quit.
+            spawn(
+                || {
+                    let output = std::process::Command::new(service::launcher()?)
+                        .arg("restart")
+                        .output()?;
+                    anyhow::ensure!(
+                        output.status.success(),
+                        "Could not restart GSeek: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    Ok(())
+                },
+                move |result| {
+                    action.set_enabled(true);
+                    if let Err(error) = result
+                        && let Some(ui) = weak.upgrade()
+                    {
+                        ui.error(&format!("{error:#}"));
+                    }
+                },
+            );
+        });
+        app.add_action(&restart);
         let about = gio::SimpleAction::new("about", None);
         let weak = Rc::downgrade(&ui);
         about.connect_activate(move |_,_|{if let Some(ui)=weak.upgrade(){
@@ -706,7 +738,7 @@ impl Window {
                         row.set_title_lines(1);
                         row.set_subtitle_lines(2);
                         let icon = gtk::Image::from_icon_name(if item.state == "indexed" {
-                            "emblem-ok-symbolic"
+                            "object-select-symbolic"
                         } else {
                             "dialog-warning-symbolic"
                         });
@@ -952,7 +984,7 @@ impl Window {
             .subtitle("Open Settings if a selected folder does not appear in the index")
             .activatable(true)
             .build();
-        scope.add_suffix(&gtk::Image::from_icon_name("external-link-symbolic"));
+        scope.add_suffix(&gtk::Image::from_icon_name("go-jump-symbolic"));
         scope.connect_activated(|_| {
             let _ = std::process::Command::new("gnome-control-center")
                 .arg("search")
@@ -1521,6 +1553,28 @@ mod tests {
             gtk::IconLookupFlags::empty(),
         );
         assert!(icon.file().unwrap().uri().starts_with("resource:///"));
+        // Control icons must also survive an absent/stale desktop icon theme.
+        for file in gio::resources_enumerate_children(
+            "/io/github/FarisZR/GSeek/icons/scalable/actions",
+            gio::ResourceLookupFlags::NONE,
+        )
+        .unwrap()
+        {
+            let name = file.strip_suffix(".svg").unwrap();
+            assert!(theme.has_icon(name), "Missing control icon: {name}");
+            let icon = theme.lookup_icon(
+                name,
+                &[],
+                16,
+                1,
+                gtk::TextDirection::None,
+                gtk::IconLookupFlags::empty(),
+            );
+            assert!(
+                icon.file().unwrap().uri().starts_with("resource:///"),
+                "{name}"
+            );
+        }
         let texture = gtk::gdk::Texture::from_resource(
             "/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png",
         );

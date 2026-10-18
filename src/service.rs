@@ -28,6 +28,7 @@ const CONTROL_XML: &str = include_str!("../data/service.xml");
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Status {
+    pub version: String,
     pub discovery_error: String,
     pub filename_error: String,
     pub discovering: bool,
@@ -123,6 +124,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
     let shared = Arc::new(Mutex::new(Status {
+        version: env!("CARGO_PKG_VERSION").into(),
         requested_backend: initial.backend,
         state: "starting".into(),
         detail: "Starting GSeek".into(),
@@ -994,20 +996,11 @@ pub fn call(method: &str, parameters: Option<&glib::Variant>) -> Result<glib::Va
     )?)
 }
 
-pub fn stop_running() {
+pub fn stop_running() -> Result<()> {
     if let Ok(connection) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
-        let _ = connection.call_sync(
-            Some(BUS_NAME),
-            CONTROL_PATH,
-            CONTROL_IFACE,
-            "Command",
-            Some(&("quit", "").to_variant()),
-            None,
-            gio::DBusCallFlags::NO_AUTO_START,
-            2000,
-            gio::Cancellable::NONE,
-        );
+        crate::lifecycle::stop_service(&connection)?;
     }
+    Ok(())
 }
 pub fn read_status() -> Result<Status> {
     let value = call("Status", None)?;
