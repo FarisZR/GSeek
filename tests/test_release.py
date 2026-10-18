@@ -46,7 +46,7 @@ class ReleaseAssembly(unittest.TestCase):
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), checksum)
             cask = (output / "gseek.rb").read_text()
             self.assertIn('version "0.1.0"', cask)
-            self.assertIn('args: ["unintegrate"]', cask)
+            self.assertIn('args: [*integration_args, "unintegrate"]', cask)
 
     def test_incomplete_release_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
