@@ -429,7 +429,7 @@ class EndToEnd(unittest.TestCase):
         pidfile = ROOT / "cuda.pid"
         fail = ROOT / "cuda-fail"
         engine = cuda / "llama-server"
-        engine.write_text(f"#!{sys.executable}\nimport os,sys,time\nfrom pathlib import Path\nPath({str(pidfile)!r}).write_text(str(os.getpid()))\nif Path({str(fail)!r}).exists():\n sys.stderr.write('CUDA error: out of memory\\n')\n sys.exit(1)\nwhile True: time.sleep(1)\n")
+        engine.write_text(f"#!/bin/sh\nprintf '%s' \"$$\" > '{pidfile}'\nif test -e '{fail}'; then printf 'CUDA error: out of memory\\n' >&2; exit 1; fi\nwhile :; do sleep 1; done\n")
         engine.chmod(0o700)
         original = json.loads(self.invoke("Settings")[0])["backend"]
         restore = "auto" if original == "cpu" else original

@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   native:
-    needs: scope
+    needs: [scope, flatpak]
     name: GNOME 51 / ${{ matrix.platform.distro }} / ${{ matrix.backend }}
     runs-on: ubuntu-24.04
     container: ${{ matrix.platform.image }}
@@ -122,6 +122,23 @@ jobs:
         run: |
           set -euo pipefail
           xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/e2e.log
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.scope.outputs.search == 'true' && matrix.backend == 'cpu'
+        with:
+          name: flatpak-x86_64
+          path: artifacts/package
+      - name: Test installed Flatpak in GNOME Activities
+        if: needs.scope.outputs.search == 'true' && matrix.backend == 'cpu'
+        env:
+          GSETTINGS_BACKEND: keyfile
+          GSEEK_TEST_FLATPAK: '1'
+          GSEEK_GUI_TEST_COMMAND: ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive -y artifacts/package/gseek-x86_64.flatpak
+          xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/flatpak-e2e.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

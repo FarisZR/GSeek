@@ -12,6 +12,20 @@ flatpak run --user --command=sh "$app" -c '
   test -e /usr/lib/"$(uname -m)"-linux-gnu/libtinysparql-3.0.so.0
   test -e /app/share/gnome-shell/search-providers/com.fariszr.gseek.ini
 '
+mkdir -p .flatpak-inference/readers
+root=$(realpath .flatpak-inference)
+python3 tests/flatpak-readers.py "$root/readers"
+flatpak run --user --filesystem="$root" --command=sh "$app" -c '
+  set -eu
+  cd "$1/readers"
+  pdfinfo sample.pdf
+  pdftotext sample.pdf - | grep "GSeek PDF reader"
+  pdftoppm -scale-to 128 -singlefile -png sample.pdf page
+  ffmpeg -nostdin -v error -y -i page.png -frames:v 1 image.ppm
+  ffmpeg -nostdin -v error -y -f lavfi -i sine=frequency=440:duration=1 -ar 16000 audio.wav
+  ffprobe -v error -show_entries stream=codec_type audio.wav | grep audio
+  unzip -p sample.docx word/document.xml | grep "GSeek Office reader"
+' sh "$root"
 if [[ "${GSEEK_TEST_INFERENCE:-false}" != true ]]; then exit 0; fi
 # Retain the verified download cache between CI runs; no model is bundled.
 mkdir -p .flatpak-inference/{data/gseek,config/gseek,cache/gseek}

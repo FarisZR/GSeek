@@ -20,12 +20,16 @@ cleanup() {
 trap cleanup EXIT
 export GSEEK_TEST_ROOT="$root"
 export XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
+export XDG_RUNTIME_DIR="$root/runtime"
+mkdir -m700 "$XDG_RUNTIME_DIR"
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
 export GSEEK_BINARY="${GSEEK_BINARY:-$PWD/target/debug/gseek}"
 mkdir -p "$XDG_DATA_HOME/gseek" "$XDG_CONFIG_HOME/gseek" "$XDG_CACHE_HOME/gseek"
 # Native development fixtures use the same static export assets as the Flatpak.
 # Installation itself is tested separately through flatpak install/build-export.
 if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then
+  mkdir -p "$XDG_CONFIG_HOME/xdg-desktop-portal"
+  printf '[preferred]\ndefault=gtk\n' > "$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
   python3 tests/flatpak-fixture.py
   export GSEEK_BINARY="$root/gseek"
 else

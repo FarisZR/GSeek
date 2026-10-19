@@ -27,7 +27,7 @@ def check_overview(bus, root, wait_for):
     Gio.Settings.new("org.gnome.desktop.interface").set_boolean("enable-animations", False)
     Gio.Settings.sync()
     runtime = root / "runtime"
-    runtime.mkdir(mode=0o700)
+    runtime.mkdir(mode=0o700, exist_ok=True)
     env = {**os.environ, "DBUS_SYSTEM_BUS_ADDRESS": os.environ["DBUS_SESSION_BUS_ADDRESS"], "XDG_RUNTIME_DIR": str(runtime), "WAYLAND_DISPLAY": "wayland-gseek-ci"}
     log = root / "shell.log"
     with log.open("w") as stream:
