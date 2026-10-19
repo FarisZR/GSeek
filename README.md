@@ -101,6 +101,15 @@ preferences show the backend Automatic actually selected. Switching backends
 interrupts the previous worker, reports download/startup progress, and preserves
 an explicit choice if its driver or memory allocation fails.
 
+**Preferences → Inference → Active Backend** shows the selected runtime and
+the device it actually uses, including software Vulkan on the CPU. During a
+switch, **Inference Status** shows download and startup progress. If CUDA or
+another explicit backend cannot start, its selection stays saved and the error
+appears here with **Retry**. Choose Automatic or another working backend to
+resume indexing; there is no separate Apply step.
+
+<p align="center"><img src="docs/screenshots/inference.png" width="640" alt="Inference preferences showing Automatic selected and CPU as the active backend."></p>
+
 GSeek also queries GNOME’s filename index directly, including Downloads and
 formats without a content reader. These files stay out of the embedding queue;
 they appear in Activities without enabling a second Files provider. Explicit

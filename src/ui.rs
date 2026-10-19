@@ -30,9 +30,10 @@ struct Window {
     progress: gtk::ProgressBar,
     current: gtk::Label,
     backend: gtk::Label,
-    backend_rows: RefCell<Vec<glib::WeakRef<adw::ActionRow>>>,
-    settings_queue: RefCell<VecDeque<SettingsWrite>>,
-    saving_settings: Cell<bool>,
+    backend_views: RefCell<Vec<BackendView>>,
+    last_status: RefCell<service::Status>,
+    settings_queue: RefCell<VecDeque<SettingsRequest>>,
+    settings_busy: Cell<bool>,
     settings_hold: RefCell<Option<gio::ApplicationHoldGuard>>,
     logs: gtk::ListBox,
     pause: gtk::Button,
@@ -44,6 +45,34 @@ struct SettingsWrite {
     method: &'static str,
     value: serde_json::Value,
     complete: Option<Box<dyn FnOnce(bool)>>,
+}
+
+type SettingsLoaded = Box<dyn FnOnce(&Rc<Window>, Settings)>;
+enum SettingsRequest {
+    Write(SettingsWrite),
+    Read(SettingsLoaded),
+}
+
+struct BackendView {
+    active: glib::WeakRef<adw::ActionRow>,
+    detail: glib::WeakRef<adw::ActionRow>,
+    retry: glib::WeakRef<gtk::Button>,
+}
+impl BackendView {
+    fn refresh(&self, status: &service::Status) -> bool {
+        let (Some(active), Some(detail), Some(retry)) = (
+            self.active.upgrade(),
+            self.detail.upgrade(),
+            self.retry.upgrade(),
+        ) else {
+            return false;
+        };
+        active.set_subtitle(&status.backend_description());
+        detail.set_subtitle(&status.detail);
+        detail.set_visible(!status.ready);
+        retry.set_visible(status.state == "error");
+        true
+    }
 }
 
 pub fn run(paths: Paths, query: Option<String>) -> Result<()> {
@@ -282,15 +311,7 @@ impl Window {
             .child(&activity_box)
             .build();
         body.append(&activity_clamp);
-        let back_stack = main_stack.clone();
-        let back_paths = paths.clone();
-        back.connect_clicked(move |_| {
-            back_stack.set_visible_child_name(if back_paths.load().is_ok_and(|s| s.configured) {
-                "library"
-            } else {
-                "welcome"
-            })
-        });
+        let back_button = back.clone();
         main_stack.connect_visible_child_name_notify(move |stack| {
             back.set_visible(matches!(
                 stack.visible_child_name().as_deref(),
@@ -378,9 +399,10 @@ impl Window {
             progress,
             current: current_file,
             backend: backend_status,
-            backend_rows: RefCell::new(Vec::new()),
+            backend_views: RefCell::new(Vec::new()),
+            last_status: RefCell::new(service::Status::default()),
             settings_queue: RefCell::new(VecDeque::new()),
-            saving_settings: Cell::new(false),
+            settings_busy: Cell::new(false),
             settings_hold: RefCell::new(None),
             logs,
             pause,
@@ -437,6 +459,19 @@ impl Window {
         });
         app.add_action(&activity);
 
+        let weak = Rc::downgrade(&ui);
+        back_button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.with_settings(|ui, settings| {
+                    ui.main_stack
+                        .set_visible_child_name(if settings.configured {
+                            "library"
+                        } else {
+                            "welcome"
+                        });
+                });
+            }
+        });
         let weak = Rc::downgrade(&ui);
         start.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
@@ -623,101 +658,104 @@ impl Window {
             return;
         }
         let weak = Rc::downgrade(self);
-        spawn(service::read_status, move |result| {
-            if let Some(ui) = weak.upgrade() {
-                ui.refreshing.set(false);
-                match result {
-                    Ok(s) => {
-                        let configured = ui.paths.load().map(|s| s.configured).unwrap_or(false);
-                        if !matches!(
-                            ui.main_stack.visible_child_name().as_deref(),
-                            Some("setup" | "results")
-                        ) {
-                            ui.main_stack.set_visible_child_name(
-                                if configured || s.state == "setup" || s.state == "error" {
-                                    "library"
-                                } else {
-                                    "welcome"
-                                },
+        spawn(
+            || {
+                Ok((
+                    service::read_status()?,
+                    service::read_settings()?.configured,
+                ))
+            },
+            move |result| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.refreshing.set(false);
+                    match result {
+                        Ok((s, configured)) => {
+                            if !matches!(
+                                ui.main_stack.visible_child_name().as_deref(),
+                                Some("setup" | "results")
+                            ) {
+                                ui.main_stack.set_visible_child_name(
+                                    if configured || s.state == "setup" || s.state == "error" {
+                                        "library"
+                                    } else {
+                                        "welcome"
+                                    },
+                                );
+                            }
+                            ui.banner.set_revealed(
+                                !s.ready || s.state == "error" || !s.discovery_error.is_empty(),
                             );
-                        }
-                        ui.banner.set_revealed(
-                            !s.ready || s.state == "error" || !s.discovery_error.is_empty(),
-                        );
-                        ui.banner.set_title(if s.discovery_error.is_empty() {
-                            &s.detail
-                        } else {
-                            &s.discovery_error
-                        });
-                        let title = match s.state.as_str() {
-                            "setup" => "Setting Up Search",
-                            "discovering" => "Finding Your Files",
-                            "indexing" => "Building Your Search Library",
-                            "paused" => "Indexing Paused",
-                            "ready" => "Ready to Search",
-                            "error" => "Search Needs Attention",
-                            _ => "Welcome to GSeek",
-                        };
-                        ui.status_title.set_text(title);
-                        ui.status_detail.set_text(&if s.discovery_error.is_empty() {
-                            s.detail.clone()
-                        } else {
-                            format!("{}\n{}", s.detail, s.discovery_error)
-                        });
-                        ui.counts.set_text(&format!(
-                            "{} files · {} indexed · {} queued · {} failed",
-                            s.counts.files, s.counts.indexed, s.counts.pending, s.counts.failed
-                        ));
-                        ui.progress.set_fraction(if s.state == "setup" {
-                            s.progress.clamp(0.0, 1.0)
-                        } else if s.counts.files > 0 {
-                            (s.counts.indexed + s.counts.skipped) as f64 / s.counts.files as f64
-                        } else {
-                            0.0
-                        });
-                        ui.current.set_text(&s.current);
-                        let backend = s.backend_description();
-                        ui.backend.set_text(&format!("Backend: {backend}"));
-                        ui.backend_rows.borrow_mut().retain(|row| {
-                            if let Some(row) = row.upgrade() {
-                                row.set_subtitle(&backend);
-                                true
+                            ui.banner.set_title(if s.discovery_error.is_empty() {
+                                &s.detail
                             } else {
-                                false
-                            }
-                        });
-                        ui.pause.set_label(if s.paused {
-                            "Resume Indexing"
-                        } else {
-                            "Pause Indexing"
-                        });
-                        if ui.search_refresh_pending.get()
-                            && ui.main_stack.visible_child_name().as_deref() == Some("results")
-                        {
-                            if s.ready
-                                && !ui.saving_settings.get()
-                                && ui.settings_queue.borrow().is_empty()
+                                &s.discovery_error
+                            });
+                            let title = match s.state.as_str() {
+                                "setup" => "Setting Up Search",
+                                "discovering" => "Finding Your Files",
+                                "indexing" => "Building Your Search Library",
+                                "paused" => "Indexing Paused",
+                                "ready" => "Ready to Search",
+                                "error" => "Search Needs Attention",
+                                _ => "Welcome to GSeek",
+                            };
+                            ui.status_title.set_text(title);
+                            ui.status_detail.set_text(&if s.discovery_error.is_empty() {
+                                s.detail.clone()
+                            } else {
+                                format!("{}\n{}", s.detail, s.discovery_error)
+                            });
+                            ui.counts.set_text(&format!(
+                                "{} files · {} indexed · {} queued · {} failed",
+                                s.counts.files, s.counts.indexed, s.counts.pending, s.counts.failed
+                            ));
+                            ui.progress.set_fraction(if s.state == "setup" {
+                                s.progress.clamp(0.0, 1.0)
+                            } else if s.counts.files > 0 {
+                                (s.counts.indexed + s.counts.skipped) as f64 / s.counts.files as f64
+                            } else {
+                                0.0
+                            });
+                            ui.current.set_text(&s.current);
+                            let backend = s.backend_description();
+                            ui.backend.set_text(&format!("Backend: {backend}"));
+                            ui.backend_views
+                                .borrow_mut()
+                                .retain(|view| view.refresh(&s));
+                            *ui.last_status.borrow_mut() = s.clone();
+                            ui.pause.set_label(if s.paused {
+                                "Resume Indexing"
+                            } else {
+                                "Pause Indexing"
+                            });
+                            if ui.search_refresh_pending.get()
+                                && ui.main_stack.visible_child_name().as_deref() == Some("results")
                             {
-                                ui.search_refresh_pending.set(false);
-                                ui.search_files();
-                            } else if !s.ready {
-                                ui.search_placeholder.set_title(if s.state == "error" {
-                                    "Search Unavailable"
-                                } else {
-                                    "Updating Search"
-                                });
-                                ui.search_placeholder.set_description(Some(&s.detail));
+                                if s.ready
+                                    && !ui.settings_busy.get()
+                                    && ui.settings_queue.borrow().is_empty()
+                                {
+                                    ui.search_refresh_pending.set(false);
+                                    ui.search_files();
+                                } else if !s.ready {
+                                    ui.search_placeholder.set_title(if s.state == "error" {
+                                        "Search Unavailable"
+                                    } else {
+                                        "Updating Search"
+                                    });
+                                    ui.search_placeholder.set_description(Some(&s.detail));
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        ui.banner.set_revealed(true);
-                        ui.banner.set_title("Cannot connect to background search. Open Preferences to repair setup.");
-                        ui.status_detail.set_text(&format!("{e:#}"));
+                        Err(e) => {
+                            ui.banner.set_revealed(true);
+                            ui.banner.set_title("Cannot connect to background search. Open Preferences to repair setup.");
+                            ui.status_detail.set_text(&format!("{e:#}"));
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
         {
             let weak = Rc::downgrade(self);
             spawn(service::read_activity, move |result| {
@@ -762,7 +800,7 @@ impl Window {
         button.set_sensitive(false);
         let weak = Rc::downgrade(self);
         let button = button.clone();
-        self.queue_settings(SettingsWrite {
+        self.queue_settings(SettingsRequest::Write(SettingsWrite {
             method: "Configure",
             value: serde_json::to_value(settings).unwrap(),
             complete: Some(Box::new(move |saved| {
@@ -772,32 +810,56 @@ impl Window {
                     ui.refresh();
                 }
             })),
-        });
+        }));
     }
 
     fn save_preference(self: &Rc<Self>, patch: serde_json::Value) {
-        self.queue_settings(SettingsWrite {
+        self.queue_settings(SettingsRequest::Write(SettingsWrite {
             method: "UpdateSettings",
             value: patch,
             complete: None,
-        });
+        }));
     }
-    fn queue_settings(self: &Rc<Self>, request: SettingsWrite) {
+    fn with_settings(self: &Rc<Self>, complete: impl FnOnce(&Rc<Self>, Settings) + 'static) {
+        // Read through the same queue as writes: reopening a page can never
+        // observe an older save or another process's XDG configuration directory.
+        self.queue_settings(SettingsRequest::Read(Box::new(complete)));
+    }
+    fn queue_settings(self: &Rc<Self>, request: SettingsRequest) {
         if self.settings_hold.borrow().is_none() {
             *self.settings_hold.borrow_mut() = self.window.application().map(|app| app.hold());
         }
         self.settings_queue.borrow_mut().push_back(request);
-        self.save_next();
+        self.process_settings();
     }
-    fn save_next(self: &Rc<Self>) {
-        if self.saving_settings.get() {
+    fn process_settings(self: &Rc<Self>) {
+        if self.settings_busy.get() {
             return;
         }
         let Some(request) = self.settings_queue.borrow_mut().pop_front() else {
             self.settings_hold.borrow_mut().take();
             return;
         };
-        self.saving_settings.set(true);
+        self.settings_busy.set(true);
+        let request = match request {
+            SettingsRequest::Write(request) => request,
+            SettingsRequest::Read(complete) => {
+                let weak = Rc::downgrade(self);
+                spawn(service::read_settings, move |result| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.settings_busy.set(false);
+                        match result {
+                            Ok(settings) => complete(&ui, settings),
+                            Err(error) => {
+                                ui.error(&format!("Could not load preferences: {error:#}"))
+                            }
+                        }
+                        ui.process_settings();
+                    }
+                });
+                return;
+            }
+        };
         let paths = self.paths.clone();
         let weak = Rc::downgrade(self);
         let method = request.method;
@@ -815,7 +877,7 @@ impl Window {
                     complete(result.is_ok());
                 }
                 if let Some(ui) = weak.upgrade() {
-                    ui.saving_settings.set(false);
+                    ui.settings_busy.set(false);
                     if let Err(error) = result {
                         ui.error(&format!("Could not save preference: {error:#}"));
                     } else if ui.main_stack.visible_child_name().as_deref() == Some("results") {
@@ -829,20 +891,17 @@ impl Window {
                             .set_description(Some("Applying preferences"));
                     }
                     ui.refresh();
-                    ui.save_next();
+                    ui.process_settings();
                 }
             },
         );
     }
 
     fn setup(self: &Rc<Self>) {
-        let settings = match self.paths.load() {
-            Ok(s) => s,
-            Err(e) => {
-                self.error(&format!("{e:#}"));
-                return;
-            }
-        };
+        self.with_settings(|ui, settings| ui.setup_with_settings(settings));
+    }
+
+    fn setup_with_settings(self: &Rc<Self>, settings: Settings) {
         let draft = Rc::new(RefCell::new(settings));
         if let Some(previous) = self.main_stack.child_by_name("setup") {
             self.main_stack.remove(&previous);
@@ -926,25 +985,19 @@ impl Window {
         let weak = Rc::downgrade(self);
         advanced.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                ui.preferences(None);
-                if let Some(dialog) = ui.window.visible_dialog() {
-                    let weak = Rc::downgrade(&ui);
-                    dialog.connect_closed(move |_| {
-                        let weak = weak.clone();
-                        glib::timeout_add_local(Duration::from_millis(50), move || {
-                            let Some(ui) = weak.upgrade() else {
-                                return glib::ControlFlow::Break;
-                            };
-                            if ui.saving_settings.get() {
-                                return glib::ControlFlow::Continue;
+                ui.with_settings(|ui, settings| {
+                    ui.preferences(Some(settings));
+                    if let Some(dialog) = ui.window.visible_dialog() {
+                        let weak = Rc::downgrade(ui);
+                        dialog.connect_closed(move |_| {
+                            if let Some(ui) = weak.upgrade()
+                                && ui.main_stack.visible_child_name().as_deref() == Some("setup")
+                            {
+                                ui.setup(); // Queued after the dialog's pending saves.
                             }
-                            if ui.main_stack.visible_child_name().as_deref() == Some("setup") {
-                                ui.setup();
-                            }
-                            glib::ControlFlow::Break
                         });
-                    });
-                }
+                    }
+                });
             }
         });
         self.main_stack.set_visible_child_name("setup");
@@ -952,12 +1005,9 @@ impl Window {
     }
 
     fn preferences(self: &Rc<Self>, initial: Option<Settings>) {
-        let settings = match initial.map(Ok).unwrap_or_else(|| self.paths.load()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.error(&format!("{e:#}"));
-                return;
-            }
+        let Some(settings) = initial else {
+            self.with_settings(|ui, settings| ui.preferences(Some(settings)));
+            return;
         };
         let draft = Rc::new(RefCell::new(settings));
         let dialog = adw::PreferencesDialog::builder()
@@ -1042,16 +1092,12 @@ impl Window {
         dialog.add(&page);
 
         let inference = adw::PreferencesPage::builder()
+            .name("inference")
             .title("Inference")
             .icon_name("applications-engineering-symbolic")
             .build();
         let local=adw::PreferencesGroup::builder().title("On This Computer").description("EmbeddingGemma 2 runs privately in a managed helper. The model is downloaded and verified automatically.").build();
-        let backends = gtk::StringList::new(&[
-            "Automatic (recommended)",
-            "CPU",
-            "Vulkan (AMD / Intel)",
-            "NVIDIA CUDA",
-        ]);
+        let backends = gtk::StringList::new(&["Automatic", "CPU", "Vulkan", "NVIDIA CUDA"]);
         let backend = adw::ComboRow::builder()
             .title("Compute Backend")
             .model(&backends)
@@ -1065,12 +1111,34 @@ impl Window {
         local.add(&backend);
         let active_backend = adw::ActionRow::builder()
             .title("Active Backend")
-            .subtitle("Checking backend status…")
+            .use_markup(false)
             .build();
+        active_backend.set_subtitle_lines(0);
         local.add(&active_backend);
-        self.backend_rows
-            .borrow_mut()
-            .push(active_backend.downgrade());
+        let detail = adw::ActionRow::builder()
+            .title("Inference Status")
+            .use_markup(false)
+            .build();
+        detail.set_subtitle_lines(0);
+        let retry = gtk::Button::builder()
+            .label("Retry")
+            .valign(gtk::Align::Center)
+            .build();
+        let weak = Rc::downgrade(self);
+        retry.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.action("setup", "");
+            }
+        });
+        detail.add_suffix(&retry);
+        local.add(&detail);
+        let view = BackendView {
+            active: active_backend.downgrade(),
+            detail: detail.downgrade(),
+            retry: retry.downgrade(),
+        };
+        view.refresh(&self.last_status.borrow());
+        self.backend_views.borrow_mut().push(view);
         let weak = Rc::downgrade(self);
         backend.connect_selected_notify(move |row| {
             if let Some(ui) = weak.upgrade() {
@@ -1078,7 +1146,8 @@ impl Window {
                     1 => Backend::Cpu,
                     2 => Backend::Vulkan,
                     3 => Backend::Cuda,
-                    _ => Backend::Auto,
+                    0 => Backend::Auto,
+                    _ => return, // An empty/disposed model has no selected backend.
                 };
                 ui.save_preference(serde_json::json!({"backend": selected}));
             }
@@ -1212,6 +1281,7 @@ impl Window {
             row.connect_apply(move |_| save());
         }
         dialog.present(Some(&self.window));
+        self.refresh();
     }
 }
 
@@ -1536,7 +1606,18 @@ mod tests {
             .flags(gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(gio::Cancellable::NONE).unwrap();
-        let ui = Window::build(&app, Paths::from_env());
+        // The desktop and D-Bus activation environments can have different XDG
+        // directories. Preferences must show what the provider actually saved.
+        let local_config = tempfile::tempdir().unwrap();
+        let mut ui_paths = Paths::from_env();
+        ui_paths.config = local_config.path().join("gseek");
+        ui_paths
+            .save(&Settings {
+                configured: true,
+                ..Settings::default()
+            })
+            .unwrap();
+        let ui = Window::build(&app, ui_paths);
         let theme = gtk::IconTheme::new();
         theme.set_search_path(&[]);
         theme.add_resource_path("/io/github/FarisZR/GSeek/icons");
@@ -1601,29 +1682,117 @@ mod tests {
         }
         ui.preferences(None);
         until(|| ui.window.visible_dialog().is_some());
+        {
+            let dialog = ui.window.visible_dialog().unwrap();
+            let row = backend_row(dialog.upcast_ref()).unwrap();
+            let saved = service::read_settings().unwrap();
+            assert_eq!(
+                row.selected(),
+                match saved.backend {
+                    Backend::Auto => 0,
+                    Backend::Cpu => 1,
+                    Backend::Vulkan => 2,
+                    Backend::Cuda => 3,
+                },
+                "Preferences must use the background service’s saved choice"
+            );
+        }
         let frame = Instant::now();
         until(|| frame.elapsed() > Duration::from_millis(400));
         if let Some(dir) = &output {
             capture(&ui.window, &dir.join("preferences.png"));
         }
-        if ui.paths.load().unwrap().backend == Backend::Cpu {
-            let dialog = ui.window.visible_dialog().unwrap();
-            let backend = backend_row(dialog.upcast_ref()).unwrap();
-            backend.set_selected(0);
-            backend.set_selected(1);
-            backend.set_selected(0);
+        if service::read_settings().unwrap().backend == Backend::Cpu {
+            {
+                let dialog = ui.window.visible_dialog().unwrap();
+                let backend = backend_row(dialog.upcast_ref()).unwrap();
+                backend.set_selected(0);
+                backend.set_selected(1);
+                backend.set_selected(0);
+            }
             // Close without a separate save action, then reopen and verify persistence.
             close_dialog(&ui.window);
-            until(|| {
-                !ui.saving_settings.get() && ui.paths.load().unwrap().backend == Backend::Auto
-            });
+            // Reopen immediately, while saves may still be in flight.
             ui.preferences(None);
             until(|| ui.window.visible_dialog().is_some());
-            let dialog = ui.window.visible_dialog().unwrap();
-            let backend = backend_row(dialog.upcast_ref()).unwrap();
-            assert_eq!(backend.selected(), 0);
-            backend.set_selected(1);
-            until(|| ui.paths.load().unwrap().backend == Backend::Cpu);
+            {
+                let dialog = ui.window.visible_dialog().unwrap();
+                let backend = backend_row(dialog.upcast_ref()).unwrap();
+                assert_eq!(backend.selected(), 0);
+                backend.set_selected(3);
+            }
+            close_dialog(&ui.window);
+            ui.preferences(None);
+            until(|| ui.window.visible_dialog().is_some());
+            {
+                let dialog = ui.window.visible_dialog().unwrap();
+                let backend = backend_row(dialog.upcast_ref()).unwrap();
+                assert_eq!(
+                    backend.selected(),
+                    3,
+                    "CUDA must survive closing and reopening"
+                );
+                backend.set_model(None::<&gio::ListModel>);
+            }
+            until(|| service::read_status().is_ok_and(|s| s.state == "error"));
+            assert_eq!(service::read_settings().unwrap().backend, Backend::Cuda);
+            ui.refresh();
+            until(|| ui.backend.text() == "Backend: Not running · NVIDIA CUDA selected");
+            {
+                let views = ui.backend_views.borrow();
+                let view = views.last().unwrap();
+                assert_eq!(
+                    view.active.upgrade().unwrap().subtitle().as_deref(),
+                    Some("Not running · NVIDIA CUDA selected")
+                );
+                assert!(
+                    view.detail
+                        .upgrade()
+                        .unwrap()
+                        .subtitle()
+                        .unwrap()
+                        .contains("CUDA test driver unavailable")
+                );
+                assert!(view.retry.upgrade().unwrap().is_visible());
+            }
+            close_dialog(&ui.window);
+            ui.preferences(None);
+            until(|| ui.window.visible_dialog().is_some());
+            {
+                let dialog = ui.window.visible_dialog().unwrap();
+                let backend = backend_row(dialog.upcast_ref()).unwrap();
+                assert_eq!(backend.selected(), 3);
+                backend.set_selected(0);
+            }
+            close_dialog(&ui.window);
+            ui.preferences(None);
+            until(|| ui.window.visible_dialog().is_some());
+            assert_eq!(
+                backend_row(ui.window.visible_dialog().unwrap().upcast_ref())
+                    .unwrap()
+                    .selected(),
+                0
+            );
+            until(|| {
+                service::read_status()
+                    .is_ok_and(|s| s.ready && s.requested_backend == Backend::Auto)
+            });
+            ui.refresh();
+            until(|| ui.backend.text() == "Backend: Automatic · CPU");
+            let dialog = ui
+                .window
+                .visible_dialog()
+                .unwrap()
+                .downcast::<adw::PreferencesDialog>()
+                .unwrap();
+            dialog.set_visible_page_name("inference");
+            let frame = Instant::now();
+            until(|| frame.elapsed() > Duration::from_millis(400));
+            if let Some(dir) = &output {
+                capture(&ui.window, &dir.join("inference.png"));
+            }
+            backend_row(dialog.upcast_ref()).unwrap().set_selected(1);
+            until(|| service::read_settings().unwrap().backend == Backend::Cpu);
             until(|| {
                 service::read_status().is_ok_and(|s| {
                     s.ready && s.requested_backend == Backend::Cpu && s.backend == "CPU"
@@ -1706,10 +1875,10 @@ mod tests {
             item.borrow::<crate::store::SearchHit>().name,
             "Rental Agreement.txt"
         );
-        if ui.paths.load().unwrap().backend == Backend::Cpu {
+        if service::read_settings().unwrap().backend == Backend::Cpu {
             ui.show_results("Show All Results");
             until(|| ui.search_results.n_items() >= 7);
-            let previous = ui.paths.load().unwrap().excluded_folders;
+            let previous = service::read_settings().unwrap().excluded_folders;
             let mut excluded = previous.clone();
             let downloads = std::path::PathBuf::from(std::env::var_os("GSEEK_TEST_ROOT").unwrap())
                 .join("Downloads");
@@ -1726,7 +1895,7 @@ mod tests {
             let generation = ui.search_generation.get();
             ui.save_preference(serde_json::json!({"excluded_folders":excluded}));
             until(|| {
-                !ui.saving_settings.get()
+                !ui.settings_busy.get()
                     && !ui.search_refresh_pending.get()
                     && ui.search_generation.get() > generation
                     && (ui.search_results.n_items() > 0
@@ -1745,7 +1914,7 @@ mod tests {
             ui.save_preference(serde_json::json!({"excluded_folders":previous}));
             until(|| {
                 ui.search_results.n_items() >= 7
-                    && !ui.saving_settings.get()
+                    && !ui.settings_busy.get()
                     && !ui.search_refresh_pending.get()
             });
             timer.remove();
@@ -1753,6 +1922,7 @@ mod tests {
         ui.show_results("");
         until(|| ui.search_results.n_items() == 0);
         ui.setup();
+        until(|| ui.main_stack.visible_child_name().as_deref() == Some("setup"));
         assert!(ui.window.visible_dialog().is_none());
         assert_eq!(ui.main_stack.visible_child_name().as_deref(), Some("setup"));
         let frame = Instant::now();

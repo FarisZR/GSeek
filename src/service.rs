@@ -45,14 +45,14 @@ pub struct Status {
 }
 impl Status {
     pub fn backend_description(&self) -> String {
-        if !self.backend.is_empty() {
+        if self.state == "error" {
+            format!("Not running · {} selected", self.requested_backend.label())
+        } else if !self.backend.is_empty() && self.ready {
             if self.requested_backend == Backend::Auto && !self.backend.starts_with("External") {
                 format!("Automatic · {}", self.backend)
             } else {
                 self.backend.clone()
             }
-        } else if self.state == "error" {
-            format!("Unavailable · {} selected", self.requested_backend.label())
         } else if self.requested_backend == Backend::Auto {
             "Automatic · selecting a backend".into()
         } else {
@@ -1016,6 +1016,15 @@ pub fn read_activity() -> Result<Vec<Activity>> {
         .context("Invalid activity response")?;
     Ok(serde_json::from_str(&json)?)
 }
+pub fn read_settings() -> Result<Settings> {
+    let value = call("Settings", None)?;
+    let (json,) = value
+        .get::<(String,)>()
+        .context("Invalid preferences response")?;
+    let settings: Settings = serde_json::from_str(&json)?;
+    settings.validate()?;
+    Ok(settings)
+}
 pub fn command(name: &str, argument: &str) -> Result<()> {
     call("Command", Some(&(name, argument).to_variant()))?;
     Ok(())
@@ -1026,4 +1035,36 @@ pub fn search(query: &str, limit: u32) -> Result<Vec<SearchHit>> {
         .get::<(String,)>()
         .context("Invalid search response")?;
     Ok(serde_json::from_str(&json)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_status_distinguishes_selection_from_a_running_device() {
+        let mut status = Status {
+            requested_backend: Backend::Auto,
+            ..Default::default()
+        };
+        assert_eq!(
+            status.backend_description(),
+            "Automatic · selecting a backend"
+        );
+        status.backend = "Vulkan · Software CPU · llvmpipe".into();
+        status.ready = true;
+        assert_eq!(
+            status.backend_description(),
+            "Automatic · Vulkan · Software CPU · llvmpipe"
+        );
+        status.requested_backend = Backend::Cuda;
+        status.ready = false;
+        // A previously used device must not be reported as active during a switch.
+        assert_eq!(status.backend_description(), "Starting NVIDIA CUDA");
+        status.state = "error".into();
+        assert_eq!(
+            status.backend_description(),
+            "Not running · NVIDIA CUDA selected"
+        );
+    }
 }
