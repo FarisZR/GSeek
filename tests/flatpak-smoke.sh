@@ -32,11 +32,20 @@ if [[ "${GSEEK_TEST_INFERENCE:-false}" != true ]]; then exit 0; fi
 # Retain the verified download cache between CI runs; no model is bundled.
 mkdir -p .flatpak-inference/{data/gseek,config/gseek,cache/gseek}
 root=$(realpath .flatpak-inference)
-args=(--user --filesystem="$root")
+args=(--user --filesystem="$root" --env=GSEEK_INFERENCE_TIMEOUT=300)
 flatpak run "${args[@]}" "$app" prepare-model
 for backend in cpu vulkan; do
   printf '{"backend":"%s"}\n' "$backend" > "$root/config/gseek/settings.json"
-  flatpak run "${args[@]}" "$app" embed 'task: search result | query: the clause about pets in the lease' > "$root/vector.json"
+  if [[ "$backend" == vulkan ]]; then
+    flatpak run "${args[@]}" --command=sh "$app" -c '
+      icd=$(find /usr/lib -name "*lvp*.json" -print -quit)
+      test -n "$icd" || { printf "Mesa software Vulkan ICD is missing\n" >&2; exit 1; }
+      export VK_DRIVER_FILES="$icd" GGML_VK_VISIBLE_DEVICES=0
+      exec gseek embed "$1"
+    ' sh 'task: search result | query: the clause about pets in the lease' > "$root/vector.json"
+  else
+    flatpak run "${args[@]}" "$app" embed 'task: search result | query: the clause about pets in the lease' > "$root/vector.json"
+  fi
   python3 - "$root/vector.json" "$backend" <<'PYTHON'
 import json, math, sys
 actual = json.load(open(sys.argv[1]))

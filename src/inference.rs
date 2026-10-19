@@ -212,7 +212,19 @@ impl Runtime {
     }
 }
 
-pub fn candidates(selected: Backend) -> Vec<Backend> {
+pub fn render_device_available(directory: &std::path::Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_name().to_str().is_some_and(|name| {
+                name.strip_prefix("renderD").is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit())
+                })
+            })
+        })
+    })
+}
+
+fn candidates(selected: Backend) -> Vec<Backend> {
     if selected != Backend::Auto {
         return vec![selected];
     }
@@ -220,7 +232,7 @@ pub fn candidates(selected: Backend) -> Vec<Backend> {
     if PathBuf::from("/dev/nvidiactl").exists() {
         result.push(Backend::Cuda);
     }
-    if PathBuf::from("/dev/dri").exists() {
+    if render_device_available(std::path::Path::new("/dev/dri")) {
         result.push(Backend::Vulkan);
     }
     result.push(Backend::Cpu);
@@ -362,7 +374,7 @@ impl Worker {
         .stdout(log.try_clone()?)
         .stderr(log);
         if backend == Backend::Vulkan
-            && !std::path::Path::new("/dev/dri").exists()
+            && !render_device_available(std::path::Path::new("/dev/dri"))
             && std::env::var_os("GGML_VK_VISIBLE_DEVICES").is_none()
         {
             cmd.env("GGML_VK_VISIBLE_DEVICES", "0");

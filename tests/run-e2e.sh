@@ -50,6 +50,6 @@ if [[ -n "${GSEEK_TEST_RUNTIME_CACHE:-}" ]]; then
   mkdir -p "$GSEEK_TEST_RUNTIME_CACHE"
   ln -s "$GSEEK_TEST_RUNTIME_CACHE" "$XDG_DATA_HOME/gseek/runtimes"
 fi
-setsid dbus-run-session -- "${GSEEK_TEST_PYTHON:-/usr/bin/python3}" tests/e2e.py &
+setsid dbus-run-session -- "${GSEEK_TEST_PYTHON:-/usr/bin/python3}" tests/e2e.py "$@" &
 session_pid=$!
 wait "$session_pid"

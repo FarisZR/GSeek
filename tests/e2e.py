@@ -537,6 +537,43 @@ class EndToEnd(unittest.TestCase):
                 wait_for(lambda: not owner(app_id), timeout=10)
             initial_window.wait(timeout=10)
 
+    def test_07d_installed_flatpak_update_restarts_the_live_deployment(self):
+        if not os.environ.get("GSEEK_TEST_UPDATE_REPO"):
+            self.skipTest("Needs a disposable installed Flatpak and its local update repository")
+        app_id = "com.fariszr.gseek"
+        def owner(name):
+            return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                "GetNameOwner", GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+        build = ROOT / "updated-app"
+        location = Path(subprocess.check_output(["flatpak", "info", "--user", "--show-location", app_id], text=True).strip())
+        shutil.copytree(location / "files", build / "files", symlinks=True)
+        shutil.copyfile(location / "metadata", build / "metadata")
+        exports = build / "export/share"
+        for relative in ["applications", "dbus-1/services", "gnome-shell/search-providers", "icons", "metainfo"]:
+            shutil.copytree(build / "files/share" / relative, exports / relative, symlinks=True)
+        marker = build / "files/share/gseek/ci-update.txt"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("A newly installed deployment\n")
+        repo = os.environ["GSEEK_TEST_UPDATE_REPO"]
+        subprocess.run(["flatpak", "build-export", repo, str(build), "stable"], check=True, capture_output=True)
+        subprocess.run(["flatpak", "build-update-repo", repo], check=True, capture_output=True)
+        ui = subprocess.Popen([BINARY], stdout=self.service_log, stderr=self.service_log)
+        actions = Gio.DBusActionGroup.get(self.bus, app_id, "/com/fariszr/gseek")
+        try:
+            wait_for(lambda: owner(app_id), timeout=15)
+            previous_window, previous_service = owner(app_id), owner(BUS)
+            settings = self.invoke("Settings")[0]
+            subprocess.run(["flatpak", "update", "--user", "--noninteractive", "-y", app_id], check=True, capture_output=True)
+            wait_for(lambda: owner(BUS) != previous_service, timeout=180)
+            wait_for(lambda: owner(app_id) != previous_window, timeout=30)
+            self.assertEqual(self.invoke("Settings")[0], settings)
+            wait_for(lambda: self.status()["ready"], timeout=300)
+            self.assertTrue(self.search("pets lease"))
+            self.assertIn("newly installed", subprocess.check_output(["flatpak", "run", "--user", "--command=cat", app_id, "/app/share/gseek/ci-update.txt"], text=True))
+        finally:
+            actions.activate_action("quit", None)
+            ui.wait(timeout=15)
+
     def test_08_native_gtk_views(self):
         if os.environ.get("GSEEK_GUI_TEST_COMMAND"):
             original_settings = self.invoke("Settings")[0]

@@ -1,6 +1,7 @@
 //! Desktop integration through the host's documented D-Bus APIs.
 use anyhow::{Context, Result, bail};
-use glib::variant::{ObjectPath, ToVariant};
+use gio::prelude::*;
+use glib::variant::ToVariant;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -90,101 +91,88 @@ fn background_request(bus: &gio::DBusConnection) -> Result<()> {
     })?
 }
 
-fn installed_update(value: &glib::Variant) -> bool {
-    let Some((info,)) = value.get::<(Options,)>() else {
-        return false;
-    };
-    let running = info.get("running-commit").and_then(|v| v.get::<String>());
-    let local = info.get("local-commit").and_then(|v| v.get::<String>());
-    matches!((running, local), (Some(running), Some(local)) if !running.is_empty() && !local.is_empty() && running != local)
+/// Flatpak marks a superseded running deployment at /app/.updated. Watching
+/// that marker applies installed updates immediately, without network polling
+/// or access to the host's installation directories.
+pub fn watch_installed_updates() -> Option<gio::FileMonitor> {
+    if std::env::var_os("FLATPAK_ID").is_none() {
+        return None;
+    }
+    match watch_update_marker(std::path::Path::new("/app/.updated"), || {
+        let result = std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(["restart", "--background"])
+                .spawn()
+        });
+        match result {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(error) => eprintln!("GSeek: cannot apply installed update: {error}"),
+        }
+    }) {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            eprintln!("GSeek: update monitor unavailable: {error:#}");
+            None
+        }
+    }
 }
 
-/// Software manages installation. Only restart after a new deployment exists
-/// locally; a remote update notification alone must not interrupt indexing.
-pub fn watch_installed_updates(
-    bus: &gio::DBusConnection,
-) -> std::rc::Rc<std::cell::RefCell<Option<gio::SignalSubscription>>> {
-    let subscription = std::rc::Rc::new(std::cell::RefCell::new(None));
-    if std::env::var_os("FLATPAK_ID").is_none() {
-        return subscription;
-    }
-    let keep = subscription.clone();
-    let bus = bus.clone();
-    glib::spawn_future_local(async move {
-        let monitor = bus
-            .call_future(
-                Some("org.freedesktop.portal.Flatpak"),
-                "/org/freedesktop/portal/Flatpak",
-                "org.freedesktop.portal.Flatpak",
-                "CreateUpdateMonitor",
-                Some(&(Options::new(),).to_variant()),
-                None,
-                gio::DBusCallFlags::NONE,
-                10000,
-            )
-            .await;
-        let handle = match monitor {
-            Ok(value) => value.get::<(ObjectPath,)>().map(|(path,)| path),
-            Err(error) => {
-                eprintln!("GSeek: update monitor unavailable: {error}");
-                return;
-            }
-        };
-        let Some(handle) = handle else {
-            return;
-        };
-        let restarting = std::cell::Cell::new(false);
-        *keep.borrow_mut() = Some(bus.subscribe_to_signal(
-            Some("org.freedesktop.portal.Flatpak"),
-            Some("org.freedesktop.portal.Flatpak.UpdateMonitor"),
-            Some("UpdateAvailable"),
-            Some(handle.as_str()),
-            None,
-            gio::DBusSignalFlags::NONE,
-            move |signal| {
-                if installed_update(signal.parameters) && !restarting.replace(true) {
-                    let result = std::env::current_exe().and_then(|exe| {
-                        std::process::Command::new(exe)
-                            .args(["restart", "--background"])
-                            .spawn()
-                    });
-                    match result {
-                        Ok(mut child) => {
-                            std::thread::spawn(move || {
-                                let _ = child.wait();
-                            });
-                        }
-                        Err(error) => {
-                            restarting.set(false);
-                            eprintln!("GSeek: cannot apply installed update: {error}");
-                        }
-                    }
-                }
-            },
-        ));
+fn watch_update_marker(
+    path: &std::path::Path,
+    restart: impl Fn() + 'static,
+) -> Result<gio::FileMonitor> {
+    let file = gio::File::for_path(path);
+    let monitor = file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)?;
+    let once = std::rc::Rc::new(std::cell::Cell::new(false));
+    let check = std::rc::Rc::new(move |file: &gio::File| {
+        if file.query_exists(gio::Cancellable::NONE) && !once.replace(true) {
+            restart();
+        }
     });
-    subscription
+    let changed = check.clone();
+    monitor.connect_changed(move |_, file, _, _| changed(file));
+    check(&file); // Also cover an update installed just before the monitor started.
+    Ok(monitor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glib::variant::ObjectPath;
     #[test]
-    fn restart_requires_an_installed_deployment_change() {
-        for (running, local, remote, expected) in [
-            ("a", "a", "b", false),
-            ("a", "b", "b", true),
-            ("", "b", "b", false),
-        ] {
-            let info = Options::from([
-                ("running-commit".into(), running.to_variant()),
-                ("local-commit".into(), local.to_variant()),
-                ("remote-commit".into(), remote.to_variant()),
-            ]);
-            assert_eq!(installed_update(&(info,).to_variant()), expected);
-        }
-        assert!(!installed_update(&().to_variant()));
+    fn installed_deployment_marker_triggers_one_restart() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join(".updated");
+        let context = glib::MainContext::new();
+        context.with_thread_default(|| -> Result<()> {
+            let count = std::rc::Rc::new(std::cell::Cell::new(0));
+            let calls = count.clone();
+            let _monitor = watch_update_marker(&path, move || calls.set(calls.get() + 1))?;
+            assert_eq!(count.get(), 0);
+            std::fs::write(&path, "")?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while count.get() == 0 && Instant::now() < deadline {
+                context.iteration(false);
+            }
+            assert_eq!(count.get(), 1);
+            std::fs::write(&path, "installed")?;
+            while context.pending() {
+                context.iteration(false);
+            }
+            assert_eq!(count.get(), 1);
+            let already_installed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let called = already_installed.clone();
+            let _monitor = watch_update_marker(&path, move || called.set(true))?;
+            assert!(already_installed.get());
+            Ok(())
+        })??;
+        Ok(())
     }
+
     #[test]
     fn background_portal_handles_immediate_responses_and_denials() -> Result<()> {
         use std::io::BufRead;

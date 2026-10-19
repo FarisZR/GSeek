@@ -70,7 +70,8 @@ jobs:
         run: |
           flatpak-builder --assumeyes --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --repo=flatpak-repo flatpak-build build-aux/com.fariszr.gseek.json
           flatpak --user remote-add --if-not-exists --no-gpg-verify gseek-ci "$PWD/flatpak-repo"
-          flatpak --user install -y --noninteractive gseek-ci com.fariszr.gseek
+          flatpak --user install --or-update -y --noninteractive gseek-ci com.fariszr.gseek
+          test "$(flatpak info --user --show-commit com.fariszr.gseek)" = "$(ostree --repo=flatpak-repo rev-parse app/com.fariszr.gseek/${{ matrix.arch }}/stable)"
           bash tests/flatpak-smoke.sh
           flatpak build-bundle flatpak-repo gseek-${{ matrix.arch }}.flatpak com.fariszr.gseek stable
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

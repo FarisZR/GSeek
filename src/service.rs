@@ -123,7 +123,7 @@ pub fn run(paths: Paths) -> Result<()> {
     Store::open(&paths.database())?.prune_scope(&initial)?;
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
-    let _updates = crate::portals::watch_installed_updates(&connection);
+    let _updates = crate::portals::watch_installed_updates();
     let shared = Arc::new(Mutex::new(Status {
         version: env!("CARGO_PKG_VERSION").into(),
         requested_backend: initial.backend,

@@ -99,8 +99,7 @@ host dconf or installs privileged registration files.
 
 Setup requests background/autostart permission through the Background portal,
 with `gseek service` as its login command. Denied permission is shown as an error.
-The service watches Flatpak’s update monitor. An installed commit different from
-the running commit triggers the existing graceful restart contract: finish queued
+The service watches Flatpak’s `/app/.updated` deployment marker. Its creation triggers the existing graceful restart contract: finish queued
 preference saves, close the old UI/service, and reactivate through host D-Bus so
 the latest deployment is used. A remote-only update does not interrupt work.
 
