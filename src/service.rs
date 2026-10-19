@@ -123,7 +123,6 @@ pub fn run(paths: Paths) -> Result<()> {
     Store::open(&paths.database())?.prune_scope(&initial)?;
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
-    let _updates = crate::portals::watch_installed_updates();
     let shared = Arc::new(Mutex::new(Status {
         version: env!("CARGO_PKG_VERSION").into(),
         requested_backend: initial.backend,
@@ -459,6 +458,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let pending_receiver = std::cell::RefCell::new(Some(rx));
     let pending_discovery = std::cell::RefCell::new(Some(discovery_rx));
     let stop = main_loop.clone();
+    let updates = std::cell::RefCell::new(None);
     let owner = gio::bus_own_name_on_connection(
         &connection,
         BUS_NAME,
@@ -467,6 +467,7 @@ pub fn run(paths: Paths) -> Result<()> {
             let Some(rx) = pending_receiver.borrow_mut().take() else {
                 return;
             };
+            *updates.borrow_mut() = crate::portals::watch_installed_updates();
             let worker_paths = worker_paths.clone();
             let worker_state = worker_state.clone();
             let discovery_rx = pending_discovery.borrow_mut().take().unwrap();

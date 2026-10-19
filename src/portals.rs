@@ -95,9 +95,7 @@ fn background_request(bus: &gio::DBusConnection) -> Result<()> {
 /// that marker applies installed updates immediately, without network polling
 /// or access to the host's installation directories.
 pub fn watch_installed_updates() -> Option<gio::FileMonitor> {
-    if std::env::var_os("FLATPAK_ID").is_none() {
-        return None;
-    }
+    std::env::var_os("FLATPAK_ID")?;
     match watch_update_marker(std::path::Path::new("/app/.updated"), || {
         let result = std::env::current_exe().and_then(|exe| {
             std::process::Command::new(exe)

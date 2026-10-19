@@ -212,7 +212,7 @@ impl Runtime {
     }
 }
 
-pub fn render_device_available(directory: &std::path::Path) -> bool {
+fn render_device_available(directory: &std::path::Path) -> bool {
     std::fs::read_dir(directory).is_ok_and(|entries| {
         entries.flatten().any(|entry| {
             entry.file_name().to_str().is_some_and(|name| {
@@ -624,6 +624,17 @@ fn normalize(vector: &mut [f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_dri_directories_do_not_count_as_gpu_render_devices() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        assert!(!render_device_available(root.path()));
+        std::fs::write(root.path().join("card0"), "")?;
+        std::fs::write(root.path().join("renderDwrong"), "")?;
+        assert!(!render_device_available(root.path()));
+        std::fs::write(root.path().join("renderD128"), "")?;
+        assert!(render_device_available(root.path()));
+        Ok(())
+    }
     #[test]
     fn memory_fitting_reports_the_final_offload_decision() {
         let log = "load: using device Vulkan0 (AMD Radeon 780M) (id) - 999 MiB free\noffloaded 0/25 layers to GPU\noffloaded 18/25 layers to GPU";
