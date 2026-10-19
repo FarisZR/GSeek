@@ -25,6 +25,11 @@ def check_overview(bus, root, wait_for):
     settings.set_boolean("disable-user-extensions", False)
     Gio.Settings.new("org.gnome.desktop.notifications").set_boolean("show-banners", False)
     Gio.Settings.new("org.gnome.desktop.interface").set_boolean("enable-animations", False)
+    # Flatpak deliberately exports providers disabled. Exercise the same host
+    # setting a user selects in Search Settings, inside this private fixture.
+    providers = Gio.Settings.new("org.gnome.desktop.search-providers")
+    providers.set_strv("enabled", ["com.fariszr.gseek.desktop"])
+    providers.set_strv("disabled", ["org.gnome.Nautilus.desktop"])
     Gio.Settings.sync()
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700, exist_ok=True)

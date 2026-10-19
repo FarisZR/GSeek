@@ -1464,7 +1464,7 @@ fn spawn<T: Send + 'static>(
 fn search_settings_group(ui: &Rc<Window>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("GNOME Search")
-        .description("GSeek includes standard file search results. Turn off Files in GNOME Settings to avoid duplicate results. LocalSearch keeps running.")
+        .description("Enable GSeek in GNOME Settings to search from Activities. GSeek includes standard file results, so you can turn off Files to avoid duplicates. LocalSearch keeps running.")
         .build();
     let row = adw::ActionRow::builder()
         .title("Search Settings")

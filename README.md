@@ -42,7 +42,7 @@ runtime comes from Flathub. No administrator access is needed for a user install
 1. Open **GSeek** and select **Choose Folders**.
 2. Choose folders to embed. Downloads is not selected by default. Folders must also be enabled in **GNOME Settings → Search → Search Locations**; LocalSearch handles discovery.
 3. Choose **Download & Start** and allow background activity. The verified model downloads once, about **865 MB**, along with the selected official inference runtime.
-4. In **Search Settings**, leave GSeek enabled and turn off Files to avoid duplicate filename results. Search from Activities.
+4. In **Search Settings**, enable GSeek and turn off Files to avoid duplicate filename results. Search from Activities.
 
 <p align="center"><img src="docs/screenshots/setup.png" width="640" alt="Set Up GSeek in the main window, with folder selection and Download & Start."></p>
 

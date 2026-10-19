@@ -92,8 +92,8 @@ never inferred from an OpenAI-compatible text endpoint.
 The application identity is `com.fariszr.gseek`. Flatpak installs the desktop
 entry, icons, GApplication activation, background service activation, and GNOME
 search-provider definition under `/app/share`. Flatpak exports and rewrites these
-files into the host’s normal XDG discovery paths. The provider is enabled by
-default; GNOME Settings controls provider selection. GSeek opens that panel using
+files into the host’s normal XDG discovery paths. Flatpak exports the provider disabled by
+default; users enable it in GNOME Settings, which controls provider selection. GSeek opens that panel using
 GNOME Settings’ documented `launch-panel` GApplication action. It never writes
 host dconf or installs privileged registration files.
 
