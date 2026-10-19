@@ -564,6 +564,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_08_native_gtk_views(self):
         if os.environ.get("GSEEK_GUI_TEST_COMMAND"):
+            original_settings = self.invoke("Settings")[0]
             # Exercise the actual preferences controls against a failed CUDA
             # launch, while healthy embeddings use the real upstream runtime.
             runtimes = ROOT / "native-runtimes"
@@ -581,42 +582,50 @@ class EndToEnd(unittest.TestCase):
                 self.command("quit")
                 wait_for(lambda: not self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", (BUS,)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
                 wait_for(lambda: self.status()["ready"], timeout=300)
-            activate_runtime(str(runtimes))
-            downloads = ROOT / "Downloads"
-            downloads.mkdir(exist_ok=True)
-            files = [downloads / f"Show All Results {i}.txt" for i in range(7)]
-            for path in files:
-                path.write_text("Only the filename should be searched.")
-                self.add(path)
-            slow_open_seen = threading.Event()
-            def slow_open_query(_connection, message, incoming, _data):
-                body = message.get_body()
-                if incoming and message.get_member() == "Query" and body and "?url = " in str(body) and "Show%20All%20Results%200.txt" in str(body):
-                    slow_open_seen.set()
-                    time.sleep(1.2)
-                return message
-            filter_id = self.bus.add_filter(slow_open_query, None)
             try:
-                wait_for(lambda: len([hit for hit in self.search("Show All Results") if hit["name"].startswith("Show All Results")]) == 7)
-                subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
-                self.assertTrue(slow_open_seen.is_set(), "The native file opener must exercise the delayed filename lookup")
-                recovered = self.docs / "Native Backend Recovery.txt"
-                try:
-                    recovered.write_text("Indexing resumed after choosing Automatic in Preferences. A violet telescope on the balcony.")
-                    self.add(recovered)
-                    wait_for(lambda: any(hit["uri"] == recovered.as_uri() for hit in self.search("violet telescope balcony")))
-                    with sqlite3.connect(ROOT / "data/gseek/index.sqlite3") as database:
-                        self.assertEqual(database.execute("SELECT state FROM files WHERE uri=?", (recovered.as_uri(),)).fetchone()[0], "indexed")
-                finally:
-                    self.remove(recovered)
-                    recovered.unlink(missing_ok=True)
-            finally:
-                self.bus.remove_filter(filter_id)
+                activate_runtime(str(runtimes))
+                downloads = ROOT / "Downloads"
+                downloads.mkdir(exist_ok=True)
+                files = [downloads / f"Show All Results {i}.txt" for i in range(7)]
                 for path in files:
-                    self.remove(path)
-                    path.unlink()
-                activate_runtime(os.environ.get("GSEEK_RUNTIME_DIR", ""))
-            self.assertTrue(self.status()["ready"],"Closing the GTK window must not stop the background service")
+                    path.write_text("Only the filename should be searched.")
+                    self.add(path)
+                slow_open_seen = threading.Event()
+                def slow_open_query(_connection, message, incoming, _data):
+                    body = message.get_body()
+                    if incoming and message.get_member() == "Query" and body and "?url = " in str(body) and "Show%20All%20Results%200.txt" in str(body):
+                        slow_open_seen.set()
+                        time.sleep(1.2)
+                    return message
+                filter_id = self.bus.add_filter(slow_open_query, None)
+                try:
+                    wait_for(lambda: len([hit for hit in self.search("Show All Results") if hit["name"].startswith("Show All Results")]) == 7)
+                    subprocess.run(os.environ["GSEEK_GUI_TEST_COMMAND"].split(), check=True)
+                    self.assertTrue(slow_open_seen.is_set(), "The native file opener must exercise the delayed filename lookup")
+                    recovered = self.docs / "Native Backend Recovery.txt"
+                    try:
+                        recovered.write_text("Indexing resumed after choosing Automatic in Preferences. A violet telescope on the balcony.")
+                        self.add(recovered)
+                        wait_for(lambda: any(hit["uri"] == recovered.as_uri() for hit in self.search("violet telescope balcony")))
+                        with sqlite3.connect(ROOT / "data/gseek/index.sqlite3") as database:
+                            self.assertEqual(database.execute("SELECT state FROM files WHERE uri=?", (recovered.as_uri(),)).fetchone()[0], "indexed")
+                    finally:
+                        self.remove(recovered)
+                        recovered.unlink(missing_ok=True)
+                finally:
+                    self.bus.remove_filter(filter_id)
+                    for path in files:
+                        self.remove(path)
+                        path.unlink()
+                self.assertTrue(self.status()["ready"],"Closing the GTK window must not stop the background service")
+            finally:
+                # Restore even when activation, the native test, or file cleanup
+                # fails. A failed UI test may have left CUDA selected.
+                try:
+                    self.invoke("Configure", GLib.Variant("(s)", (original_settings,)))
+                finally:
+                    activate_runtime(os.environ.get("GSEEK_RUNTIME_DIR", ""))
+
         else:
             self.skipTest("Run under Xvfb or GNOME with GSEEK_GUI_TEST_COMMAND to capture native views")
 
