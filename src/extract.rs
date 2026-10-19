@@ -446,7 +446,7 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     }
     resolve_tool(
         name,
-        ["/usr/bin", "/bin", "/usr/local/bin"]
+        ["/app/bin", "/usr/bin", "/bin", "/usr/local/bin"]
             .into_iter()
             .map(PathBuf::from)
             .chain(std::env::split_paths(
@@ -465,15 +465,15 @@ pub fn tool(name: &str) -> PathBuf {
 
 pub fn reader_status() -> Vec<(&'static str, String)> {
     [
-        ("PDF Documents", &["pdfinfo", "pdftotext", "pdftoppm"][..], "poppler-utils"),
-        ("Images, Audio, and Video", &["ffmpeg", "ffprobe"][..], "ffmpeg (Fedora: ffmpeg-free)"),
-        ("Office Documents", &["unzip"][..], "unzip"),
-    ].into_iter().map(|(title, tools, package)| {
+        ("PDF Documents", &["pdfinfo", "pdftotext", "pdftoppm"][..]),
+        ("Images, Audio, and Video", &["ffmpeg", "ffprobe"][..]),
+        ("Office Documents", &["unzip"][..]),
+    ].into_iter().map(|(title, tools)| {
         let missing: Vec<_> = tools.iter().filter(|name| find_tool(name).is_none()).copied().collect();
         let description = if missing.is_empty() {
-            "Available from installed tools".into()
+            "Included in GSeek".into()
         } else {
-            format!("Unavailable: {}. Install {package} with your system package manager, then retry affected files.", missing.join(", "))
+            format!("Unavailable: {}. Repair or reinstall the GSeek Flatpak, then retry affected files.", missing.join(", "))
         };
         (title, description)
     }).collect()
@@ -484,14 +484,8 @@ fn reader_help(program: &std::ffi::OsStr) -> String {
         .file_name()
         .unwrap_or(program)
         .to_string_lossy();
-    let package = match name.as_ref() {
-        "ffmpeg" | "ffprobe" => "ffmpeg (Fedora: ffmpeg-free)",
-        "pdfinfo" | "pdftotext" | "pdftoppm" => "poppler-utils",
-        "unzip" => "unzip",
-        _ => "the corresponding program",
-    };
     format!(
-        "Cannot start {name}. Install {package} with your system package manager, then choose Retry Failed in GSeek."
+        "Cannot start {name}. Repair or reinstall the GSeek Flatpak, then choose Retry Failed in GSeek."
     )
 }
 
@@ -576,26 +570,26 @@ fn strip_xml(xml: &str) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn installed_system_reader_wins_and_existing_path_reader_is_a_fallback() -> Result<()> {
+    fn packaged_reader_takes_priority_and_runtime_reader_remains_available() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let system = root.path().join("system");
-        let brew = root.path().join("homebrew");
-        for (dir, response) in [(&system, "system"), (&brew, "homebrew")] {
+        let system = root.path().join("app");
+        let runtime = root.path().join("runtime");
+        for (dir, response) in [(&system, "system"), (&runtime, "runtime")] {
             fs::create_dir(dir)?;
             let program = dir.join("ffmpeg");
             fs::write(&program, format!("#!/bin/sh\nprintf {response}"))?;
             fs::set_permissions(program, fs::Permissions::from_mode(0o755))?;
         }
-        let selected = resolve_tool("ffmpeg", [system.clone(), brew.clone()]).unwrap();
+        let selected = resolve_tool("ffmpeg", [system.clone(), runtime.clone()]).unwrap();
         assert_eq!(Command::new(selected).output()?.stdout, b"system");
         fs::set_permissions(system.join("ffmpeg"), fs::Permissions::from_mode(0o644))?;
-        let selected = resolve_tool("ffmpeg", [system, brew]).unwrap();
-        assert_eq!(Command::new(selected).output()?.stdout, b"homebrew");
+        let selected = resolve_tool("ffmpeg", [system, runtime]).unwrap();
+        assert_eq!(Command::new(selected).output()?.stdout, b"runtime");
         Ok(())
     }
 
     #[test]
-    fn missing_reader_explains_system_install_and_retry() -> Result<()> {
+    fn missing_reader_explains_package_repair_and_retry() -> Result<()> {
         let root = tempfile::tempdir()?;
         let error = run_output(
             &mut Command::new(root.path().join("pdftotext")),
@@ -604,9 +598,8 @@ mod tests {
         )
         .unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("poppler-utils"));
+        assert!(message.contains("GSeek Flatpak"));
         assert!(message.contains("Retry Failed"));
-        assert!(!message.contains("reinstall GSeek"));
         Ok(())
     }
 

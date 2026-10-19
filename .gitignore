@@ -4,3 +4,8 @@
 /work/
 *.AppImage
 __pycache__/
+.flatpak-builder/
+flatpak-build/
+flatpak-repo/
+.flatpak-inference/
+*.flatpak

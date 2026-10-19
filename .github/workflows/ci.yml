@@ -131,46 +131,47 @@ jobs:
             gnome-version.txt
           if-no-files-found: warn
 
-  homebrew:
+  flatpak:
     needs: scope
-    name: Homebrew lifecycle / ${{ matrix.os }}
+    name: Flatpak / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - { os: ubuntu-24.04, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Homebrew and host development dependencies
-        shell: bash
+      - name: Install Flatpak build tools
         run: |
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          brew update
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config xvfb xauth dbus-x11 libvulkan1
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-          echo "PKG_CONFIG=/usr/bin/pkg-config" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_LIBDIR=/usr/lib/$(gcc -dumpmachine)/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ${{ needs.scope.outputs.inference == 'true' && '.runtime-data/gseek/runtimes' || '' }}
-          key: brew-${{ runner.arch }}-${{ needs.scope.outputs.inference == 'true' && 'runtime' || 'build' }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
-      - name: Build the native application and test its cask
-        shell: bash
+            ~/.local/share/flatpak
+            .flatpak-builder
+            .flatpak-inference
+          key: flatpak-${{ matrix.arch }}-${{ hashFiles('build-aux/*.json', 'Cargo.lock') }}
+          restore-keys: flatpak-${{ matrix.arch }}-
+      - name: Build and install the sandboxed app
         run: |
-          rustup toolchain install 1.99.0 --profile minimal
-          cargo build --locked --release
-          bash scripts/package.sh
-          python3 scripts/test-homebrew.py
-      - name: Verify upstream runtime installation for all three backends
-        if: needs.scope.outputs.inference == 'true'
+          flatpak-builder --assumeyes --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --repo=flatpak-repo flatpak-build build-aux/com.fariszr.gseek.json
+          flatpak --user remote-add --if-not-exists --no-gpg-verify gseek-ci "$PWD/flatpak-repo"
+          flatpak --user install -y --noninteractive gseek-ci com.fariszr.gseek
+          flatpak build-bundle flatpak-repo gseek-${{ matrix.arch }}.flatpak com.fariszr.gseek stable
+      - name: Check packaged readers, libraries, and model inference
         env:
-          XDG_DATA_HOME: ${{ github.workspace }}/.runtime-data
-        run: cargo test --locked --lib managed_runtime::tests::official_runtime_distributions_install_and_link -- --ignored --nocapture
+          GSEEK_TEST_INFERENCE: ${{ needs.scope.outputs.inference }}
+        run: bash tests/flatpak-smoke.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: gseek-${{ matrix.arch }}.flatpak
+          if-no-files-found: error
+          compression-level: 0

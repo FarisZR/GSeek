@@ -1,0 +1,131 @@
+{
+  "app-id": "com.fariszr.gseek",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "51",
+  "sdk": "org.gnome.Sdk",
+  "command": "gseek",
+  "default-branch": "stable",
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--filesystem=host:ro",
+    "--own-name=com.fariszr.gseek.Service",
+    "--talk-name=org.freedesktop.LocalSearch3",
+    "--talk-name=org.freedesktop.Tracker3.Miner.Files",
+    "--talk-name=org.gnome.Settings"
+  ],
+  "modules": [
+    {
+      "name": "rust-toolchain",
+      "buildsystem": "simple",
+      "build-commands": [
+        "./install.sh --prefix=/app --components=rustc,cargo,rust-std-$(uname -m)-unknown-linux-gnu --disable-ldconfig"
+      ],
+      "cleanup": [
+        "*"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://static.rust-lang.org/dist/rust-1.99.0-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "891c6366d7100feda0bca4c03ce63f3c9ac827cbebbc283e7433061d42c6a376",
+          "only-arches": [
+            "x86_64"
+          ]
+        },
+        {
+          "type": "archive",
+          "url": "https://static.rust-lang.org/dist/rust-1.99.0-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "5a30ce742be0835d9b23fc862db5cbbbc71464e1c9b1fca22917e10e4ba32a92",
+          "only-arches": [
+            "aarch64"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "poppler",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DENABLE_BOOST=OFF",
+        "-DENABLE_CPP=OFF",
+        "-DENABLE_GLIB=OFF",
+        "-DENABLE_QT5=OFF",
+        "-DENABLE_QT6=OFF",
+        "-DENABLE_LIBCURL=OFF",
+        "-DENABLE_GPGME=OFF",
+        "-DENABLE_NSS3=OFF",
+        "-DBUILD_MANUAL_TESTS=OFF",
+        "-DENABLE_GOBJECT_INTROSPECTION=OFF"
+      ],
+      "cleanup": [
+        "/include",
+        "/lib/pkgconfig",
+        "/share/man",
+        "/bin/pdfattach",
+        "/bin/pdfdetach",
+        "/bin/pdffonts",
+        "/bin/pdfimages",
+        "/bin/pdfseparate",
+        "/bin/pdfsig",
+        "/bin/pdftocairo",
+        "/bin/pdftohtml",
+        "/bin/pdftops",
+        "/bin/pdfunite"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://poppler.freedesktop.org/poppler-26.10.0.tar.xz",
+          "sha256": "6792cb7c69205007ad87d2e936cecc5b3a31fac29ab54ffc3175fdb6b2a6ce35"
+        }
+      ]
+    },
+    {
+      "name": "gseek",
+      "buildsystem": "simple",
+      "build-options": {
+        "env": {
+          "CARGO_HOME": "/run/build/gseek/cargo",
+          "CARGO_NET_OFFLINE": "true"
+        }
+      },
+      "build-commands": [
+        "cargo --offline build --release --locked",
+        "install -Dm755 target/release/gseek /app/bin/gseek",
+        "install -Dm644 data/com.fariszr.gseek.desktop /app/share/applications/com.fariszr.gseek.desktop",
+        "install -Dm644 data/com.fariszr.gseek.service /app/share/dbus-1/services/com.fariszr.gseek.service",
+        "install -Dm644 data/com.fariszr.gseek.Service.service /app/share/dbus-1/services/com.fariszr.gseek.Service.service",
+        "install -Dm644 data/com.fariszr.gseek.ini /app/share/gnome-shell/search-providers/com.fariszr.gseek.ini",
+        "install -Dm644 data/com.fariszr.gseek.svg /app/share/icons/hicolor/scalable/apps/com.fariszr.gseek.svg",
+        "install -Dm644 data/icons/512x512/apps/com.fariszr.gseek.png /app/share/icons/hicolor/512x512/apps/com.fariszr.gseek.png",
+        "install -Dm644 data/com.fariszr.gseek.metainfo.xml /app/share/metainfo/com.fariszr.gseek.metainfo.xml",
+        "install -Dm644 LICENSE /app/share/licenses/gseek/LICENSE"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": [
+            ".git",
+            "target",
+            "build",
+            "dist",
+            ".flatpak-builder",
+            "_flatpak",
+            "work"
+          ]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ],
+  "build-options": {
+    "strip": false,
+    "no-debuginfo": true
+  }
+}

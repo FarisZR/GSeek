@@ -123,6 +123,7 @@ pub fn run(paths: Paths) -> Result<()> {
     Store::open(&paths.database())?.prune_scope(&initial)?;
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
+    let _updates = crate::portals::watch_installed_updates(&connection);
     let shared = Arc::new(Mutex::new(Status {
         version: env!("CARGO_PKG_VERSION").into(),
         requested_backend: initial.backend,
@@ -180,11 +181,11 @@ pub fn run(paths: Paths) -> Result<()> {
                                                 .to_variant(),
                                         )),
                                         Ok(Err(e)) => invocation.return_dbus_error(
-                                            "io.github.FarisZR.GSeek.InferenceError",
+                                            "com.fariszr.gseek.InferenceError",
                                             &e,
                                         ),
                                         Err(_) => invocation.return_dbus_error(
-                                            "io.github.FarisZR.GSeek.Unavailable",
+                                            "com.fariszr.gseek.Unavailable",
                                             "Search worker stopped",
                                         ),
                                     }
@@ -235,9 +236,9 @@ pub fn run(paths: Paths) -> Result<()> {
                                     match receiver.recv().await {
                                         Ok(Ok(())) => invocation.return_value(None),
                                         Ok(Err(e)) => invocation
-                                            .return_dbus_error("io.github.FarisZR.GSeek.Error", &e),
+                                            .return_dbus_error("com.fariszr.gseek.Error", &e),
                                         Err(_) => invocation.return_dbus_error(
-                                            "io.github.FarisZR.GSeek.Error",
+                                            "com.fariszr.gseek.Error",
                                             "File opener stopped",
                                         ),
                                     }
@@ -260,10 +261,7 @@ pub fn run(paths: Paths) -> Result<()> {
                         Ok(())
                     })();
                     if let Err(error) = result {
-                        errors.return_dbus_error(
-                            "io.github.FarisZR.GSeek.Error",
-                            &format!("{error:#}"),
-                        );
+                        errors.return_dbus_error("com.fariszr.gseek.Error", &format!("{error:#}"));
                     }
                 },
             )
@@ -345,9 +343,6 @@ pub fn run(paths: Paths) -> Result<()> {
                                     .into();
                                     status.detail = "Applying preferences".into();
                                 }
-                                if !settings.search_enabled {
-                                    integration::disable_search(&paths)?;
-                                }
                                 tx.send(if settings.configured {
                                     Command::Setup
                                 } else {
@@ -370,11 +365,11 @@ pub fn run(paths: Paths) -> Result<()> {
                                             &(serde_json::to_string(&hits).unwrap(),).to_variant(),
                                         )),
                                         Ok(Err(e)) => invocation.return_dbus_error(
-                                            "io.github.FarisZR.GSeek.InferenceError",
+                                            "com.fariszr.gseek.InferenceError",
                                             &e,
                                         ),
                                         Err(_) => invocation.return_dbus_error(
-                                            "io.github.FarisZR.GSeek.Unavailable",
+                                            "com.fariszr.gseek.Unavailable",
                                             "Search worker stopped",
                                         ),
                                     }
@@ -409,20 +404,6 @@ pub fn run(paths: Paths) -> Result<()> {
                                             Some(argument.into())
                                         }))?
                                     }
-                                    "enable-search" => {
-                                        let mut s = paths.load()?;
-                                        s.search_enabled = true;
-                                        paths.save(&s)?;
-                                        if state.lock().unwrap().ready {
-                                            integration::enable_search(&paths)?;
-                                        }
-                                    }
-                                    "disable-search" => {
-                                        let mut s = paths.load()?;
-                                        s.search_enabled = false;
-                                        paths.save(&s)?;
-                                        integration::disable_search(&paths)?;
-                                    }
                                     "quit" => {
                                         tx.send(Command::Quit)?;
                                         control_discovery.send(DiscoveryCommand::Quit)?;
@@ -442,7 +423,7 @@ pub fn run(paths: Paths) -> Result<()> {
                             }
                         }
                         Err(e) => invocation
-                            .return_dbus_error("io.github.FarisZR.GSeek.Error", &format!("{e:#}")),
+                            .return_dbus_error("com.fariszr.gseek.Error", &format!("{e:#}")),
                     }
                 },
             )
@@ -522,9 +503,7 @@ pub fn run(paths: Paths) -> Result<()> {
 }
 
 pub fn launcher() -> Result<PathBuf> {
-    Ok(std::env::var_os("GSEEK_LAUNCHER")
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_exe()?))
+    Ok(std::env::current_exe()?)
 }
 
 struct SearchJob {
@@ -820,9 +799,6 @@ fn index_loop(
                 current_work.check()?;
                 settings = latest;
                 store.activate_pipeline(&runtime.fingerprint())?;
-                if settings.search_enabled {
-                    integration::enable_search(paths)?;
-                }
                 Ok(runtime)
             })();
             match initialized {

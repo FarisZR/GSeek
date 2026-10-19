@@ -34,11 +34,11 @@ jobs:
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
-  core:
+
+  build:
     needs: inspect
     if: needs.inspect.outputs.build == 'true'
-
-    name: Native package / ${{ matrix.arch }}
+    name: Flatpak release / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -51,53 +51,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install build dependencies
+      - name: Install Flatpak build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libtracker-sparql-3.0-dev pkg-config tar
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            .release-data/gseek
-          key: release-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
-          restore-keys: release-${{ matrix.arch }}-
-      - name: Build native app
-        run: |
-          cargo build --release --locked
-          bash scripts/package.sh '${{ matrix.arch }}'
-      - name: Validate packaged CPU inference on this architecture
+            ~/.local/share/flatpak
+            .flatpak-builder
+            .flatpak-inference
+          key: flatpak-${{ matrix.arch }}-${{ hashFiles('build-aux/*.json', 'Cargo.lock') }}
+          restore-keys: flatpak-${{ matrix.arch }}-
+      - name: Build and test exact release deployment
         env:
-          XDG_DATA_HOME: ${{ github.workspace }}/.release-data
-          XDG_CONFIG_HOME: ${{ github.workspace }}/.release-config
-          XDG_CACHE_HOME: ${{ github.workspace }}/.release-cache
+          GSEEK_TEST_INFERENCE: 'true'
         run: |
-          mkdir -p "$XDG_CONFIG_HOME/gseek"
-          printf '{"backend":"cpu"}\n' > "$XDG_CONFIG_HOME/gseek/settings.json"
-          dist/package/gseek/bin/gseek prepare-model
-          dist/package/gseek/bin/gseek embed 'task: search result | query: the clause about pets in the lease' > /tmp/gseek-release-vector.json
-          python3 - <<'PYTHON'
-          import json, math
-          actual=json.load(open('/tmp/gseek-release-vector.json'))
-          reference=json.load(open('data/reference-embedding.json'))
-          assert len(actual)==768 and all(math.isfinite(value) for value in actual)
-          score=sum(a*b for a,b in zip(actual,reference))
-          assert score > 0.999, f'Packaged inference drift: {score}'
-          print(f'Packaged inference reference cosine: {score:.6f}')
-          PYTHON
+          flatpak-builder --assumeyes --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --repo=flatpak-repo flatpak-build build-aux/com.fariszr.gseek.json
+          flatpak --user remote-add --if-not-exists --no-gpg-verify gseek-ci "$PWD/flatpak-repo"
+          flatpak --user install -y --noninteractive gseek-ci com.fariszr.gseek
+          bash tests/flatpak-smoke.sh
+          flatpak build-bundle flatpak-repo gseek-${{ matrix.arch }}.flatpak com.fariszr.gseek stable
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: core-${{ matrix.arch }}
-          path: dist/gseek-linux-${{ matrix.arch }}.tar.gz
+          name: release-${{ matrix.arch }}
+          path: gseek-${{ matrix.arch }}.flatpak
           if-no-files-found: error
           compression-level: 0
-  assemble:
-    name: Assemble and stage release
-    needs: [core]
+  publish:
+    needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -106,23 +91,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: release-artifacts
-      - name: Assemble and validate checksums
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          python3 scripts/assemble-release.py "$version" release-artifacts release
-          (cd release && sha256sum --check SHA256SUMS)
-          ruby -c release/gseek.rb
-          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Stage a draft release for installation verification
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Publish verified Flatpak bundles
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v$RELEASE_VERSION"
-          if gh release view "$tag" --json isDraft --jq .isDraft > /tmp/gseek-release-draft 2>/dev/null; then
-            test "$(cat /tmp/gseek-release-draft)" = true
-            gh release upload "$tag" release/* --clobber
-            gh release edit "$tag" --draft --target "$GITHUB_SHA"
-          else
-            gh release create "$tag" release/* --target "$GITHUB_SHA" --title "GSeek $RELEASE_VERSION" --draft --generate-notes
-          fi
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          (cd release && sha256sum gseek-*.flatpak > SHA256SUMS)
+          gh release create "v$version" release/* --target "$GITHUB_SHA" --title "GSeek $version" --generate-notes

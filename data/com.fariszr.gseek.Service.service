@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=com.fariszr.gseek.Service
+Exec=/app/bin/gseek service

@@ -1,9 +1,9 @@
-<p align="center"><img src="data/io.github.FarisZR.GSeek.svg" width="96" alt=""></p>
+<p align="center"><img src="data/com.fariszr.gseek.svg" width="96" alt=""></p>
 <h1 align="center">GSeek</h1>
 <p align="center"><b>Find your files by what you remember.</b><br>
 Private, multilingual search in GNOME Activities, powered by
 <a href="https://huggingface.co/google/embeddinggemma-2">EmbeddingGemma 2</a>.</p>
-<p align="center"><a href="#install"><b>Install with Homebrew</b></a> ·
+<p align="center"><a href="#install"><b>Install with Flatpak</b></a> ·
 <a href="https://github.com/FarisZR/GSeek/releases/latest">Releases</a> ·
 <a href="docs/DEVELOPMENT.md">Build and contribute</a><br>
 <sub>Native GTK4 and libadwaita. No account. No telemetry.</sub></p>
@@ -24,66 +24,57 @@ activity, and preferences.
 
 ## Install
 
-GSeek targets **GNOME 51**, including Fedora Workstation 45 and Ubuntu 26.10, on
-Linux **x86-64 and ARM64**. Other distributions need a compatible GNOME desktop,
-LocalSearch, and glibc 2.39 or newer. GSeek uses your desktop’s native GTK and
-LocalSearch libraries.
-
-With [Homebrew](https://brew.sh) 6 or newer:
+GSeek targets **GNOME 51**, including Fedora Workstation 45 and Ubuntu 26.10,
+on Linux **x86-64 and ARM64**. Install [Flatpak](https://flatpak.org/setup/) for
+your distribution, then open [Install GSeek](https://flatpak.fariszr.com/gseek.flatpakref)
+in GNOME Software, or run:
 
 ```sh
-brew update
-brew tap fariszr/tap
-brew trust fariszr/tap
-brew install --cask gseek
+flatpak install --user https://flatpak.fariszr.com/gseek.flatpakref
 ```
 
-Homebrew installs the app, desktop entry, background activation,
-and search provider. It asks for administrator permission to place the small
-provider registration in GNOME’s system data directory.
+Packages come from [FarisZR’s signed repository](https://flatpak.fariszr.com),
+hosted on Cloudflare Pages. GSeek is not published on Flathub; the shared GNOME
+runtime comes from Flathub. No administrator access is needed for a user installation.
 
 <p align="center"><img src="docs/screenshots/welcome.png" width="640" alt="GSeek welcome page with a centered setup checklist."></p>
 
-1. Open **GSeek** from the app menu and select **Choose Folders**.
-2. Choose folders to embed. Downloads is not selected by default. They must also be enabled in **GNOME Settings → Search → Search Locations**; GSeek uses LocalSearch’s existing discovery index.
-3. Choose **Download & Start**. The verified model downloads once, about **865 MB**, along with the selected upstream runtime.
-4. Search from Activities. Setup enables GSeek and disables the Files search provider after inference is ready.
+1. Open **GSeek** and select **Choose Folders**.
+2. Choose folders to embed. Downloads is not selected by default. Folders must also be enabled in **GNOME Settings → Search → Search Locations**; LocalSearch handles discovery.
+3. Choose **Download & Start** and allow background activity. The verified model downloads once, about **865 MB**, along with the selected official inference runtime.
+4. In **Search Settings**, leave GSeek enabled and turn off Files to avoid duplicate filename results. Search from Activities.
 
 <p align="center"><img src="docs/screenshots/setup.png" width="640" alt="Set Up GSeek in the main window, with folder selection and Download & Start."></p>
 
-There is no inference server or SDK to install. Closing the window keeps indexing
-and overview search running. Update with `brew upgrade --cask gseek`. Upgrades
-restart the background service and reopen an existing GSeek window automatically.
-You can also choose **Restart GSeek** from the main menu or run `gseek restart`.
-Your settings and indexed files are preserved.
+Closing the window keeps indexing and overview search running. The background
+portal controls startup at login. Your software manager handles updates, or run
+`flatpak update`. GSeek restarts its running service after an update is installed,
+reopening its window only if it was already open. **Restart GSeek** is also in the
+main menu (`flatpak run com.fariszr.gseek restart` from a terminal).
 
-Uninstalling with `brew uninstall --cask gseek` removes desktop integration and
-restores the Files provider’s previous setting. Your local library and settings
-are kept so a reinstall can reuse them.
+Settings, indexes, and verified downloads live in
+`~/.var/app/com.fariszr.gseek/` and survive updates and normal uninstall/reinstall.
+Use `flatpak uninstall --delete-data com.fariszr.gseek` to remove them too.
 
-## System readers
+## Included file readers and sandbox permissions
 
-GSeek reuses your desktop’s GTK, libadwaita, LocalSearch, and installed content
-readers. The cask does **not** install Homebrew’s FFmpeg, Poppler, audio stack, or
-codec tree. On a host with OpenSSL 3, it requests **zero Homebrew formulas**.
-Only hosts missing that ABI need the small `openssl@3` compatibility dependency
-for the official inference binary; it is isolated from GNOME’s libraries.
+The Flatpak includes everything needed to read documents and media. It uses the
+shared GNOME platform for GTK, libadwaita, TinySPARQL, FFmpeg, unzip, and graphics
+drivers, and packages Poppler’s PDF readers. No host reader installation or
+inference engine compilation is required.
 
-Text files need no additional readers. Setup and Preferences show which other
-formats are available:
-
-| Formats | Existing system programs |
+| Formats | Included programs |
 | --- | --- |
-| PDFs, including scanned pages | `pdfinfo`, `pdftotext`, `pdftoppm` (`poppler-utils`) |
+| PDFs, including scanned pages | `pdfinfo`, `pdftotext`, `pdftoppm` |
 | Images, audio, video | `ffmpeg`, `ffprobe` |
 | DOCX, ODT | `unzip` |
 
-If you want these formats and the tools are missing, install them through your
-**distribution’s** package manager (`ffmpeg-free` on Fedora, `ffmpeg` on Ubuntu;
-`poppler-utils` and `unzip` on both). Already installed tools are reused. Missing
-readers produce an actionable error for affected files; choose **Retry Failed**
-after installing them. GSeek still requires working embeddings for every search.
-The base system’s `tar` unpacks verified upstream runtimes.
+GSeek needs read-only access to files so it can read the paths supplied by your
+host’s LocalSearch index, including removable drives. Its own data stays writable.
+Network access downloads verified models/runtimes and supports an optional
+explicitly configured endpoint. GPU access supports Vulkan and NVIDIA drivers.
+Targeted D-Bus permissions access LocalSearch and open GNOME’s Search Settings.
+There is no unrestricted session-bus or host-command permission.
 
 ## Indexing you can control
 
@@ -181,7 +172,7 @@ instead of assuming GPU acceleration.
 
 Managed inference runs on your computer. Network access downloads checksummed
 model files and the selected checksummed upstream runtime. There is no telemetry or
-in-app update polling; Homebrew manages updates.
+in-app update polling; Flatpak and your software manager install updates.
 
 Advanced users can configure an OpenAI-compatible **text embedding** endpoint.
 GSeek validates EmbeddingGemma 2’s dimensions and a reference embedding before
@@ -212,8 +203,7 @@ checks, and release packaging, and [Architecture](docs/ARCHITECTURE.md) for proc
 boundaries and storage contracts.
 
 GitHub Actions covers GNOME 51 on Fedora 45 and Ubuntu 26.10, CPU and Vulkan,
-Homebrew lifecycle and installation/link checks for all three upstream runtimes
-on both architectures, native GTK views, actual overview
+Flatpak builds and sandboxed CPU inference on both architectures, native GTK views, actual overview
 search, multilingual retrieval, multimodal readers, database migrations, progress
 recovery, provider metadata and activation, and explicit inference failures.
 

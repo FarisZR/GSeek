@@ -28,10 +28,10 @@ from gi.repository import Gio, GLib
 
 ROOT = Path(os.environ["GSEEK_TEST_ROOT"])
 BINARY = os.environ["GSEEK_BINARY"]
-BUS = "io.github.FarisZR.GSeek.Service"
-CONTROL = "/io/github/FarisZR/GSeek/Service"
-PROVIDER = "/io/github/FarisZR/GSeek/SearchProvider"
-IFACE = "io.github.FarisZR.GSeek.Service1"
+BUS = "com.fariszr.gseek.Service"
+CONTROL = "/com/fariszr/gseek/Service"
+PROVIDER = "/com/fariszr/gseek/SearchProvider"
+IFACE = "com.fariszr.gseek.Service1"
 SHELL_IFACE = "org.gnome.Shell.SearchProvider2"
 
 
@@ -78,10 +78,9 @@ class EndToEnd(unittest.TestCase):
             path.write_text(content)
             cls.add(path)
         cls.add(cls.docs)
-        settings = {"version": 1, "configured": False, "folders": [str(cls.docs)], "backend": os.environ.get("GSEEK_TEST_BACKEND", "cpu"), "search_enabled": True}
+        settings = {"version": 1, "configured": False, "folders": [str(cls.docs)], "backend": os.environ.get("GSEEK_TEST_BACKEND", "cpu")}
         (ROOT / "config/gseek/settings.json").write_text(json.dumps(settings))
         cls.service_log = open(ROOT / "service.log", "w")
-        subprocess.run([BINARY, "integrate"], check=True)
         # Exercise service activation through its installed XDG .service file, not a manually started daemon.
         cls.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
         wait_for(lambda: cls.status()["ready"], timeout=300)
@@ -479,37 +478,14 @@ class EndToEnd(unittest.TestCase):
             wait_for(stopped)
             wait_for(lambda: self.status()["ready"], timeout=300)
 
-    def test_07_install_is_idempotent_and_uninstall_preserves_user_edits(self):
-        subprocess.run([BINARY, "integrate"], check=True)
-        desktop = ROOT / "data/applications/io.github.FarisZR.GSeek.desktop"
-        self.assertIn(str(Path(BINARY).resolve()), desktop.read_text())
-        icon = Path(next(line[5:] for line in desktop.read_text().splitlines() if line.startswith("Icon=")))
-        self.assertTrue(icon.is_absolute(), "Desktop icon must not depend on theme cache lookup")
-        self.assertEqual(icon.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
-        # The complete lifecycle is checked in a separate sandbox so it cannot stop this test service.
-        root = ROOT / "install-test"
-        env = {**os.environ, "XDG_DATA_HOME": str(root / "data"), "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache")}
-        subprocess.run([BINARY, "integrate"], env=env, check=True)
-        desktop = root / "data/applications/io.github.FarisZR.GSeek.desktop"
-        desktop.write_text(desktop.read_text() + "# User customization\n")
-        manifest = json.loads((root / "config/gseek/integration.json").read_text())
-        self.assertIn(str(desktop), manifest["files"])
-        sentinel=root / "data/gseek/preserve.txt"
-        sentinel.write_text("Keep indexed data")
-        subprocess.run([BINARY,"unintegrate"],env=env,check=True)
-        self.assertTrue(desktop.is_file(),"User-edited registration must be preserved")
-        self.assertTrue(sentinel.is_file())
-        self.assertFalse((root / "data/dbus-1/services/io.github.FarisZR.GSeek.Service.service").exists())
-        wait_for(lambda:self.status()["ready"])
-
     def test_07b_show_all_launches_and_updates_the_existing_native_window(self):
         if not os.environ.get("DISPLAY"):
             self.skipTest("Needs a native display")
         def running():
-            return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", ("io.github.FarisZR.GSeek",)), None, Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+            return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", ("com.fariszr.gseek",)), None, Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
         self.invoke("LaunchSearch", GLib.Variant("(asu)", (["Rental", "Agreement"], 0)), SHELL_IFACE, PROVIDER)
         wait_for(running)
-        actions = Gio.DBusActionGroup.get(self.bus, "io.github.FarisZR.GSeek", "/io/github/FarisZR/GSeek")
+        actions = Gio.DBusActionGroup.get(self.bus, "com.fariszr.gseek", "/com/fariszr/gseek")
         def query():
             state = actions.get_action_state("search")
             return state.unpack() if state else None
@@ -524,10 +500,10 @@ class EndToEnd(unittest.TestCase):
             actions.activate_action("quit", None)
             wait_for(lambda: not running())
 
-    def test_07c_restart_menu_and_install_replace_the_live_window_and_service(self):
+    def test_07c_restart_menu_replaces_the_live_window_and_service(self):
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             self.skipTest("Needs a native display")
-        app_id = "io.github.FarisZR.GSeek"
+        app_id = "com.fariszr.gseek"
         def owner(name):
             try:
                 return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
@@ -536,7 +512,7 @@ class EndToEnd(unittest.TestCase):
             except GLib.Error:
                 return None
         def activate(action):
-            self.bus.call_sync(app_id, "/io/github/FarisZR/GSeek", "org.gtk.Actions", "Activate",
+            self.bus.call_sync(app_id, "/com/fariszr/gseek", "org.gtk.Actions", "Activate",
                 GLib.Variant("(sava{sv})", (action, [], {})), None, Gio.DBusCallFlags.NONE, 2000, None)
         def replaced(name, previous):
             current = owner(name)
@@ -544,8 +520,7 @@ class EndToEnd(unittest.TestCase):
         initial_window = subprocess.Popen([BINARY], stdout=self.service_log, stderr=self.service_log)
         wait_for(lambda: owner(app_id), timeout=10)
         try:
-            for restart in [lambda: activate("restart"),
-                            lambda: subprocess.run([BINARY, "integrate"], check=True, timeout=40)]:
+            for restart in [lambda: activate("restart")]:
                 previous_window, previous_service = owner(app_id), owner(BUS)
                 settings = self.invoke("Settings")[0]
                 restart()

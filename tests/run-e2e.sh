@@ -14,6 +14,7 @@ cleanup() {
     done
     kill -KILL -- "-$session_pid" 2>/dev/null || true
   fi
+  if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then flatpak override --user --reset com.fariszr.gseek; fi
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -22,10 +23,14 @@ export XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME=
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
 export GSEEK_BINARY="${GSEEK_BINARY:-$PWD/target/debug/gseek}"
 mkdir -p "$XDG_DATA_HOME/gseek" "$XDG_CONFIG_HOME/gseek" "$XDG_CACHE_HOME/gseek"
-# Shell intentionally ignores user data directories for search providers. Mirror
-# the cask's system artifact inside this disposable session's system data root.
-mkdir -p "$root/system/share/gnome-shell/search-providers"
-cp data/io.github.FarisZR.GSeek.ini "$root/system/share/gnome-shell/search-providers/"
+# Native development fixtures use the same static export assets as the Flatpak.
+# Installation itself is tested separately through flatpak install/build-export.
+if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then
+  python3 tests/flatpak-fixture.py
+  export GSEEK_BINARY="$root/gseek"
+else
+  python3 tests/install-fixture.py
+fi
 export XDG_DATA_DIRS="$root/system/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 if [[ -n "${GSEEK_TEST_MODEL_CACHE:-}" ]]; then
   mkdir -p "$GSEEK_TEST_MODEL_CACHE"

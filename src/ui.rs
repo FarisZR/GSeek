@@ -185,7 +185,7 @@ impl Window {
                 .expect("Valid embedded GTK resources");
         });
         let display = gtk::gdk::Display::default().expect("GTK has a display");
-        gtk::IconTheme::for_display(&display).add_resource_path("/io/github/FarisZR/GSeek/icons");
+        gtk::IconTheme::for_display(&display).add_resource_path("/com/fariszr/gseek/icons");
         gtk::Window::set_default_icon_name(APP_ID);
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -220,7 +220,7 @@ impl Window {
 
         let welcome = adw::StatusPage::builder()
             .paintable(&gtk::gdk::Texture::from_resource(
-                "/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png",
+                "/com/fariszr/gseek/icons/512x512/apps/com.fariszr.gseek.png",
             ))
             .title("Set Up GSeek")
             .description("Search documents, photos, and recordings from the Activities overview")
@@ -860,14 +860,13 @@ impl Window {
                 return;
             }
         };
-        let paths = self.paths.clone();
         let weak = Rc::downgrade(self);
         let method = request.method;
         let value = request.value;
         spawn(
             move || {
                 if method == "Configure" {
-                    integration::install(&paths, &service::launcher()?)?;
+                    crate::portals::request_background()?;
                 }
                 service::call(method, Some(&(value.to_string(),).to_variant()))?;
                 Ok(())
@@ -934,14 +933,7 @@ impl Window {
         content.append(&locations);
         content.append(&default_exclusions_group());
         content.append(&reader_status_group());
-        let group = adw::PreferencesGroup::new();
-        let replace = adw::SwitchRow::builder()
-            .title("Use GSeek in GNOME Search")
-            .subtitle("Enable GSeek and disable the Files provider after the model is ready.")
-            .active(true)
-            .build();
-        group.add(&replace);
-        content.append(&group);
+        content.append(&search_settings_group(self));
         let privacy = label(
             "No account. No telemetry. Files stay on this computer.",
             "dim-label",
@@ -977,9 +969,7 @@ impl Window {
         let settings = draft.clone();
         start.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
-                let mut s = settings.borrow().clone();
-                s.search_enabled = replace.is_active();
-                ui.apply_settings(s, button);
+                ui.apply_settings(settings.borrow().clone(), button);
             }
         });
         let weak = Rc::downgrade(self);
@@ -1029,18 +1019,6 @@ impl Window {
         add.set_valign(gtk::Align::Center);
         locations.set_header_suffix(Some(&add));
         connect_folder_picker(&add, &self.window, &folder_list, &draft, false, self);
-        let scope = adw::ActionRow::builder()
-            .title("GNOME Search Locations")
-            .subtitle("Open Settings if a selected folder does not appear in the index")
-            .activatable(true)
-            .build();
-        scope.add_suffix(&gtk::Image::from_icon_name("go-jump-symbolic"));
-        scope.connect_activated(|_| {
-            let _ = std::process::Command::new("gnome-control-center")
-                .arg("search")
-                .spawn();
-        });
-
         page.add(&locations);
         let exclusions = adw::PreferencesGroup::builder()
             .title("Excluded Folders")
@@ -1076,19 +1054,7 @@ impl Window {
         types.add(&extensions);
         page.add(&types);
         page.add(&reader_status_group());
-        let integration_group = adw::PreferencesGroup::builder()
-            .title("GNOME Integration")
-            .build();
-        let replace = adw::SwitchRow::builder()
-            .title("Use GSeek in GNOME Search")
-            .subtitle(
-                "Enable GSeek and disable the Files search provider. LocalSearch keeps running.",
-            )
-            .active(draft.borrow().search_enabled)
-            .build();
-        integration_group.add(&replace);
-        integration_group.add(&scope);
-        page.add(&integration_group);
+        page.add(&search_settings_group(self));
         dialog.add(&page);
 
         let inference = adw::PreferencesPage::builder()
@@ -1224,7 +1190,6 @@ impl Window {
         dialog.add(&diagnostics);
         connect_switch(&images, "images", self);
         connect_switch(&media, "audio_video", self);
-        connect_switch(&replace, "search_enabled", self);
         extensions.set_show_apply_button(true);
         let weak = Rc::downgrade(self);
         extensions.connect_apply(move |row| {
@@ -1496,6 +1461,32 @@ fn spawn<T: Send + 'static>(
     });
 }
 
+fn search_settings_group(ui: &Rc<Window>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("GNOME Search")
+        .description("GSeek includes standard file search results. Turn off Files in GNOME Settings to avoid duplicate results. LocalSearch keeps running.")
+        .build();
+    let row = adw::ActionRow::builder()
+        .title("Search Settings")
+        .subtitle("Choose search providers and search locations")
+        .activatable(true)
+        .build();
+    row.add_suffix(&gtk::Image::from_icon_name("go-jump-symbolic"));
+    let weak = Rc::downgrade(ui);
+    row.connect_activated(move |_| {
+        let weak = weak.clone();
+        spawn(crate::portals::open_search_settings, move |result| {
+            if let Err(error) = result
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.error(&format!("Cannot open GNOME Settings: {error:#}"));
+            }
+        });
+    });
+    group.add(&row);
+    group
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,7 +1593,7 @@ mod tests {
     fn native_views() {
         adw::init().unwrap();
         let app = adw::Application::builder()
-            .application_id("io.github.FarisZR.GSeek.UITest")
+            .application_id("com.fariszr.gseek.UITest")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(gio::Cancellable::NONE).unwrap();
@@ -1620,7 +1611,7 @@ mod tests {
         let ui = Window::build(&app, ui_paths);
         let theme = gtk::IconTheme::new();
         theme.set_search_path(&[]);
-        theme.add_resource_path("/io/github/FarisZR/GSeek/icons");
+        theme.add_resource_path("/com/fariszr/gseek/icons");
         assert!(
             theme.has_icon(APP_ID),
             "App icon must work with no installed icon theme"
@@ -1636,7 +1627,7 @@ mod tests {
         assert!(icon.file().unwrap().uri().starts_with("resource:///"));
         // Control icons must also survive an absent/stale desktop icon theme.
         for file in gio::resources_enumerate_children(
-            "/io/github/FarisZR/GSeek/icons/scalable/actions",
+            "/com/fariszr/gseek/icons/scalable/actions",
             gio::ResourceLookupFlags::NONE,
         )
         .unwrap()
@@ -1657,7 +1648,7 @@ mod tests {
             );
         }
         let texture = gtk::gdk::Texture::from_resource(
-            "/io/github/FarisZR/GSeek/icons/512x512/apps/io.github.FarisZR.GSeek.png",
+            "/com/fariszr/gseek/icons/512x512/apps/com.fariszr.gseek.png",
         );
         assert_eq!((texture.width(), texture.height()), (512, 512));
         let output = std::env::var_os("GSEEK_SCREENSHOT_DIR").map(PathBuf::from);
