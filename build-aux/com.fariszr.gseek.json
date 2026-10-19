@@ -127,7 +127,25 @@
             "dist",
             ".flatpak-builder",
             "_flatpak",
-            "work"
+            "work",
+            "flatpak-build",
+            "flatpak-repo",
+            ".flatpak-inference",
+            ".ci-data",
+            ".ci-config",
+            ".ci-cache",
+            "artifacts",
+            "release",
+            ".runtime-data",
+            ".release-data",
+            ".release-config",
+            ".release-cache",
+            ".github",
+            "README.md",
+            "tests",
+            "docs/screenshots",
+            "docs/ARCHITECTURE.md",
+            "docs/DEVELOPMENT.md"
           ]
         },
         "cargo-sources.json"

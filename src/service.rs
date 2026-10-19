@@ -972,12 +972,6 @@ pub fn call(method: &str, parameters: Option<&glib::Variant>) -> Result<glib::Va
     )?)
 }
 
-pub fn stop_running() -> Result<()> {
-    if let Ok(connection) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
-        crate::lifecycle::stop_service(&connection)?;
-    }
-    Ok(())
-}
 pub fn read_status() -> Result<Status> {
     let value = call("Status", None)?;
     let (json,) = value
