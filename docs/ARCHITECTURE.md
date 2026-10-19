@@ -67,7 +67,10 @@ Auto hardware selection retries with another backend if initialization or infere
 explicit backend reports its failure.
 
 Preference updates merge individual fields against the latest saved settings on
-the service's D-Bus thread. The UI serializes those updates. Replacing settings
+the service's D-Bus thread. The UI serializes reads and writes through one queue,
+including reopening Preferences while a save is in flight. All UI settings come
+from the service's `Settings` method; the desktop process does not read a second
+configuration from its own potentially different XDG environment. Replacing settings
 cancels both index and query workers, including blocked local inference requests,
 before another GPU context starts. Runtime downloads and startup report progress.
 The requested and active backends remain separate in status.

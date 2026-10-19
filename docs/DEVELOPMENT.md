@@ -77,6 +77,10 @@ cover actual multilingual retrieval, automatic file events, opening results,
 provider metadata, pause/resume, exclusions, concurrent searches, desktop lifecycle,
 GTK views, and inference failures. Native snapshots are generated from mapped GTK
 widgets, including setup and a narrow window.
+The native preferences regression uses a different GUI configuration directory,
+changes CUDA through the real ComboRow, closes and reopens the dialog while saves
+are pending, and checks failure details and recovery to Automatic. Only the CUDA
+launch failure is injected; recovered indexing and search use the real CPU model.
 
 To test the **real GNOME overview**, add `GSEEK_TEST_SHELL=1` and
 `GSETTINGS_BACKEND=keyfile` to that command. GNOME Shell must be installed and able
