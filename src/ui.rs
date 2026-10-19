@@ -1736,8 +1736,10 @@ mod tests {
             }
             until(|| service::read_status().is_ok_and(|s| s.state == "error"));
             assert_eq!(service::read_settings().unwrap().backend, Backend::Cuda);
-            ui.refresh();
-            until(|| ui.backend.text() == "Backend: Not running · NVIDIA CUDA selected");
+            until(|| {
+                ui.refresh();
+                ui.backend.text() == "Backend: Not running · NVIDIA CUDA selected"
+            });
             {
                 let views = ui.backend_views.borrow();
                 let view = views.last().unwrap();
@@ -1777,8 +1779,10 @@ mod tests {
                 service::read_status()
                     .is_ok_and(|s| s.ready && s.requested_backend == Backend::Auto)
             });
-            ui.refresh();
-            until(|| ui.backend.text() == "Backend: Automatic · CPU");
+            until(|| {
+                ui.refresh();
+                ui.backend.text() == "Backend: Automatic · CPU"
+            });
             let dialog = ui
                 .window
                 .visible_dialog()
@@ -1798,8 +1802,10 @@ mod tests {
                     s.ready && s.requested_backend == Backend::Cpu && s.backend == "CPU"
                 })
             });
-            ui.refresh();
-            until(|| ui.backend.text() == "Backend: CPU");
+            until(|| {
+                ui.refresh();
+                ui.backend.text() == "Backend: CPU"
+            });
         }
         close_dialog(&ui.window);
         ui.show_results("Show All Results");
