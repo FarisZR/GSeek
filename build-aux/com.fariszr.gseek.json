@@ -60,7 +60,8 @@
         "-DENABLE_GPGME=OFF",
         "-DENABLE_NSS3=OFF",
         "-DBUILD_MANUAL_TESTS=OFF",
-        "-DENABLE_GOBJECT_INTROSPECTION=OFF"
+        "-DENABLE_GOBJECT_INTROSPECTION=OFF",
+        "-DCMAKE_INSTALL_LIBDIR=lib"
       ],
       "cleanup": [
         "/include",
@@ -85,7 +86,9 @@
         }
       ],
       "post-install": [
-        "strip --strip-unneeded /app/lib/libpoppler.so /app/bin/pdfinfo /app/bin/pdftotext /app/bin/pdftoppm"
+        "strip --strip-unneeded /app/lib/libpoppler.so /app/bin/pdfinfo /app/bin/pdftotext /app/bin/pdftoppm",
+        "install -Dm644 COPYING /app/share/licenses/poppler/COPYING",
+        "install -Dm644 COPYING3 /app/share/licenses/poppler/COPYING3"
       ]
     },
     {
@@ -107,7 +110,11 @@
         "install -Dm644 data/com.fariszr.gseek.svg /app/share/icons/hicolor/scalable/apps/com.fariszr.gseek.svg",
         "install -Dm644 data/icons/512x512/apps/com.fariszr.gseek.png /app/share/icons/hicolor/512x512/apps/com.fariszr.gseek.png",
         "install -Dm644 data/com.fariszr.gseek.metainfo.xml /app/share/metainfo/com.fariszr.gseek.metainfo.xml",
-        "install -Dm644 LICENSE /app/share/licenses/gseek/LICENSE"
+        "install -Dm644 LICENSE /app/share/licenses/gseek/LICENSE",
+        "cargo --offline metadata --locked --format-version 1 | python3 scripts/dependency-notices.py > RUST-DEPENDENCIES.txt",
+        "install -Dm644 RUST-DEPENDENCIES.txt /app/share/licenses/gseek/RUST-DEPENDENCIES.txt",
+        "install -Dm644 data/icons/COPYING-LGPL-3.0 /app/share/licenses/gseek/Adwaita-LGPL-3.0",
+        "install -Dm644 docs/THIRD_PARTY.md /app/share/licenses/gseek/THIRD_PARTY.md"
       ],
       "sources": [
         {

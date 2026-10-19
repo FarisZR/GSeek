@@ -14,6 +14,8 @@ flatpak run --user --command=sh "$app" -c '
 '
 mkdir -p .flatpak-inference/readers
 root=$(realpath .flatpak-inference)
+python3 tests/flatpak-data.py "$root"
+trap 'python3 tests/flatpak-data.py "$root" --reset' EXIT
 python3 tests/flatpak-readers.py "$root/readers"
 flatpak run --user --filesystem="$root" --command=sh "$app" -c '
   set -eu
@@ -31,7 +33,7 @@ if [[ "${GSEEK_TEST_INFERENCE:-false}" != true ]]; then exit 0; fi
 mkdir -p .flatpak-inference/{data/gseek,config/gseek,cache/gseek}
 root=$(realpath .flatpak-inference)
 printf '{"backend":"cpu"}\n' > "$root/config/gseek/settings.json"
-args=(--user --filesystem="$root" --env=XDG_DATA_HOME="$root/data" --env=XDG_CONFIG_HOME="$root/config" --env=XDG_CACHE_HOME="$root/cache")
+args=(--user --filesystem="$root")
 flatpak run "${args[@]}" "$app" prepare-model
 flatpak run "${args[@]}" "$app" embed 'task: search result | query: the clause about pets in the lease' > "$root/vector.json"
 python3 - "$root/vector.json" <<'PY'

@@ -3,13 +3,13 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import sys
 
 root = Path(os.environ['GSEEK_TEST_ROOT'])
 app = 'com.fariszr.gseek'
 # Per-test overrides never request new production permissions. Remove on exit.
-subprocess.run(['flatpak', 'override', '--user', f'--filesystem={root}',
-    f'--env=XDG_DATA_HOME={root}/data', f'--env=XDG_CONFIG_HOME={root}/config',
-    f'--env=XDG_CACHE_HOME={root}/cache', app], check=True)
+subprocess.run(['flatpak', 'override', '--user', f'--filesystem={root}', app], check=True)
+subprocess.run([sys.executable, str(Path(__file__).with_name('flatpak-data.py')), str(root)], check=True)
 exports = Path(subprocess.check_output(['flatpak', 'info', '--user', '--show-location', app], text=True).strip()) / 'export/share'
 # Use the actual installed/re-written exports, including D-Bus activation, desktop
 # identity and search-provider registration. No test-generated provider files.

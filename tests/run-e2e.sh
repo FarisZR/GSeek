@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then
+  export FLATPAK_USER_DIR="${FLATPAK_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/flatpak}"
+fi
 root=$(mktemp -d -t gseek-e2e-XXXXXXXX)
 cleanup() {
   if [[ -n "${session_pid:-}" ]]; then
@@ -14,7 +17,10 @@ cleanup() {
     done
     kill -KILL -- "-$session_pid" 2>/dev/null || true
   fi
-  if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then flatpak override --user --reset com.fariszr.gseek; fi
+  if [[ "${GSEEK_TEST_FLATPAK:-}" == 1 ]]; then
+    python3 tests/flatpak-data.py "$root" --reset
+    flatpak override --user --reset com.fariszr.gseek
+  fi
   rm -rf "$root"
 }
 trap cleanup EXIT
