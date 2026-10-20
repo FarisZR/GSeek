@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   native:
-    needs: [scope, flatpak]
+    needs: scope
     name: GNOME 51 / ${{ matrix.platform.distro }} / ${{ matrix.backend }}
     runs-on: ubuntu-24.04
     container:
@@ -124,13 +124,57 @@ jobs:
         run: |
           set -euo pipefail
           xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/e2e.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-${{ matrix.platform.distro }}-${{ matrix.backend }}
+          path: |
+            artifacts/
+            gnome-version.txt
+          if-no-files-found: warn
+
+  installed:
+    needs: [scope, flatpak]
+    if: needs.scope.outputs.search == 'true'
+    name: Installed Flatpak / ${{ matrix.platform.distro }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.platform.image }}
+      options: --privileged
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { distro: ubuntu-26.10, image: 'ubuntu:26.10' }
+          - { distro: fedora-45, image: 'fedora:45' }
+    env:
+      GSK_RENDERER: cairo
+      GSETTINGS_BACKEND: keyfile
+      GSEEK_TEST_SHELL: '1'
+      GSEEK_TEST_BACKEND: cpu
+      GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
+      GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
+      GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
+      XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
+      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
+      XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
+      GSEEK_INFERENCE_TIMEOUT: '300'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install GNOME test dependencies
+        run: bash scripts/ci-deps.sh
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ci-data/gseek
+          key: installed-${{ matrix.platform.distro }}-${{ hashFiles('data/runtimes.json') }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: needs.scope.outputs.search == 'true' && matrix.backend == 'cpu'
         with:
           name: flatpak-x86_64
           path: artifacts/package
       - name: Test installed Flatpak in GNOME Activities
-        if: needs.scope.outputs.search == 'true' && matrix.backend == 'cpu'
         env:
           GSETTINGS_BACKEND: keyfile
           GSEEK_TEST_FLATPAK: '1'
@@ -153,10 +197,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: evidence-${{ matrix.platform.distro }}-${{ matrix.backend }}
-          path: |
-            artifacts/
-            gnome-version.txt
+          name: installed-evidence-${{ matrix.platform.distro }}
+          path: artifacts/
           if-no-files-found: warn
 
   flatpak:

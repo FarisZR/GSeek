@@ -55,9 +55,13 @@ class InferenceScope(unittest.TestCase):
         self.assertTrue(self.selected({"Cargo.toml"}, MANIFEST + 'new_runtime_crate="1"\n'))
 
     def test_search_and_ui_changes_keep_fast_cpu_integration_coverage(self):
-        for path in ["src/service.rs", "src/ui.rs", "src/store.rs", "tests/e2e.py", "Cargo.lock"]:
+        for path in ["src/service.rs", "src/ui.rs", "src/store.rs", "tests/e2e.py", "Cargo.lock",
+                     "tests/install-fixture.py", "tests/flatpak-fixture.py", "tests/flatpak-data.py",
+                     "data/com.fariszr.gseek.desktop", "data/com.fariszr.gseek.ini",
+                     "data/com.fariszr.gseek.service", "data/com.fariszr.gseek.Service.service",
+                     ".github/workflows/ci.yml"]:
             self.assertTrue(scope.requires_search({path}, False))
-        self.assertFalse(scope.requires_search({"README.md", ".github/workflows/ci.yml"}, False))
+        self.assertFalse(scope.requires_search({"README.md"}, False))
         self.assertTrue(scope.requires_search({"data/runtimes.json"}, True))
 
 

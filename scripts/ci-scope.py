@@ -16,8 +16,10 @@ DESKTOP_DEPENDENCIES = {"gtk", "adw", "gio", "glib", "clap", "rusqlite", "unicod
 
 
 def requires_search(paths, inference):
-    return inference or any(path.startswith(("src/", "build-aux/")) or path in {
-        "Cargo.toml", "Cargo.lock", "tests/e2e.py", "tests/run-e2e.sh", "tests/shell.py"
+    return inference or any(path.startswith(("src/", "build-aux/", "data/com.fariszr.gseek")) or path in {
+        "Cargo.toml", "Cargo.lock", "tests/e2e.py", "tests/run-e2e.sh", "tests/shell.py",
+        "tests/install-fixture.py", "tests/flatpak-fixture.py", "tests/flatpak-data.py",
+        ".github/workflows/ci.yml"
     } for path in paths)
 
 

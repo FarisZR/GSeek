@@ -574,17 +574,17 @@ mod tests {
         let root = tempfile::tempdir()?;
         let system = root.path().join("app");
         let runtime = root.path().join("runtime");
-        for (dir, response) in [(&system, "system"), (&runtime, "runtime")] {
+        for dir in [&system, &runtime] {
             fs::create_dir(dir)?;
             let program = dir.join("ffmpeg");
-            fs::write(&program, format!("#!/bin/sh\nprintf {response}"))?;
+            fs::write(&program, "#!/bin/sh\nexit 0\n")?;
             fs::set_permissions(program, fs::Permissions::from_mode(0o755))?;
         }
         let selected = resolve_tool("ffmpeg", [system.clone(), runtime.clone()]).unwrap();
-        assert_eq!(Command::new(selected).output()?.stdout, b"system");
+        assert_eq!(selected, system.join("ffmpeg"));
         fs::set_permissions(system.join("ffmpeg"), fs::Permissions::from_mode(0o644))?;
-        let selected = resolve_tool("ffmpeg", [system, runtime]).unwrap();
-        assert_eq!(Command::new(selected).output()?.stdout, b"runtime");
+        let selected = resolve_tool("ffmpeg", [system, runtime.clone()]).unwrap();
+        assert_eq!(selected, runtime.join("ffmpeg"));
         Ok(())
     }
 

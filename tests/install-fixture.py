@@ -19,7 +19,10 @@ for relative, original in [
 ]:
     target = data / relative
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source / original, target)
+    if original.endswith('.desktop'):
+        target.write_text((source / original).read_text().replace('Exec=gseek', f'Exec="{binary}"'))
+    else:
+        shutil.copyfile(source / original, target)
 provider = root / 'system/share/gnome-shell/search-providers/com.fariszr.gseek.ini'
 provider.parent.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(source / 'com.fariszr.gseek.ini', provider)
