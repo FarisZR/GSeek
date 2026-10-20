@@ -139,7 +139,6 @@ pub struct Settings {
     pub paused: bool,
     pub images: bool,
     pub audio_video: bool,
-    pub search_enabled: bool,
     pub max_file_mb: u64,
 }
 
@@ -211,7 +210,6 @@ impl Default for Settings {
             paused: false,
             images: true,
             audio_video: true,
-            search_enabled: false,
             max_file_mb: 2048,
         }
     }

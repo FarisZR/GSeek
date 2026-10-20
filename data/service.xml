@@ -1,4 +1,4 @@
-<node><interface name="io.github.FarisZR.GSeek.Service1">
+<node><interface name="com.fariszr.gseek.Service1">
  <method name="Status"><arg type="s" direction="out"/></method>
  <method name="Settings"><arg type="s" direction="out"/></method>
  <method name="Activity"><arg type="s" direction="out"/></method>

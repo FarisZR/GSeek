@@ -212,7 +212,19 @@ impl Runtime {
     }
 }
 
-pub fn candidates(selected: Backend) -> Vec<Backend> {
+fn render_device_available(directory: &std::path::Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_name().to_str().is_some_and(|name| {
+                name.strip_prefix("renderD").is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit())
+                })
+            })
+        })
+    })
+}
+
+fn candidates(selected: Backend) -> Vec<Backend> {
     if selected != Backend::Auto {
         return vec![selected];
     }
@@ -220,7 +232,7 @@ pub fn candidates(selected: Backend) -> Vec<Backend> {
     if PathBuf::from("/dev/nvidiactl").exists() {
         result.push(Backend::Cuda);
     }
-    if PathBuf::from("/dev/dri").exists() {
+    if render_device_available(std::path::Path::new("/dev/dri")) {
         result.push(Backend::Vulkan);
     }
     result.push(Backend::Cpu);
@@ -354,21 +366,15 @@ impl Worker {
         let log_start = log.metadata()?.len();
         cmd.env(
             "LD_LIBRARY_PATH",
-            std::env::join_paths(
-                std::iter::once(dir.clone())
-                    .chain(std::env::split_paths(
-                        &std::env::var_os("GSEEK_RUNTIME_LIBRARY_PATH").unwrap_or_default(),
-                    ))
-                    .chain(std::env::split_paths(
-                        &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
-                    )),
-            )?,
+            std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
+                &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+            )))?,
         )
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
         if backend == Backend::Vulkan
-            && !std::path::Path::new("/dev/dri").exists()
+            && !render_device_available(std::path::Path::new("/dev/dri"))
             && std::env::var_os("GGML_VK_VISIBLE_DEVICES").is_none()
         {
             cmd.env("GGML_VK_VISIBLE_DEVICES", "0");
@@ -618,6 +624,17 @@ fn normalize(vector: &mut [f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_dri_directories_do_not_count_as_gpu_render_devices() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        assert!(!render_device_available(root.path()));
+        std::fs::write(root.path().join("card0"), "")?;
+        std::fs::write(root.path().join("renderDwrong"), "")?;
+        assert!(!render_device_available(root.path()));
+        std::fs::write(root.path().join("renderD128"), "")?;
+        assert!(render_device_available(root.path()));
+        Ok(())
+    }
     #[test]
     fn memory_fitting_reports_the_final_offload_decision() {
         let log = "load: using device Vulkan0 (AMD Radeon 780M) (id) - 999 MiB free\noffloaded 0/25 layers to GPU\noffloaded 18/25 layers to GPU";

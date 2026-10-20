@@ -33,7 +33,7 @@ class InferenceScope(unittest.TestCase):
     def test_ui_restart_icons_docs_and_workflow_changes_do_not_load_models(self):
         self.assertFalse(self.selected({"src/ui.rs", "src/lifecycle.rs", "src/main.rs", "src/integration.rs",
             "src/service.rs", "data/gseek.gresource.xml", "data/icons/check.svg", "README.md",
-            "scripts/render-cask.py", "tests/e2e.py", ".github/workflows/ci.yml"}))
+            "docs/DEVELOPMENT.md", "tests/e2e.py", ".github/workflows/ci.yml"}))
 
     def test_inference_code_input_readers_and_pins_require_the_full_suite(self):
         for path in scope.INFERENCE_PATHS:
@@ -55,9 +55,13 @@ class InferenceScope(unittest.TestCase):
         self.assertTrue(self.selected({"Cargo.toml"}, MANIFEST + 'new_runtime_crate="1"\n'))
 
     def test_search_and_ui_changes_keep_fast_cpu_integration_coverage(self):
-        for path in ["src/service.rs", "src/ui.rs", "src/store.rs", "tests/e2e.py", "Cargo.lock"]:
+        for path in ["src/service.rs", "src/ui.rs", "src/store.rs", "tests/e2e.py", "Cargo.lock",
+                     "tests/install-fixture.py", "tests/flatpak-fixture.py", "tests/flatpak-data.py",
+                     "data/com.fariszr.gseek.desktop", "data/com.fariszr.gseek.ini",
+                     "data/com.fariszr.gseek.service", "data/com.fariszr.gseek.Service.service",
+                     ".github/workflows/ci.yml"]:
             self.assertTrue(scope.requires_search({path}, False))
-        self.assertFalse(scope.requires_search({"README.md", ".github/workflows/ci.yml"}, False))
+        self.assertFalse(scope.requires_search({"README.md"}, False))
         self.assertTrue(scope.requires_search({"data/runtimes.json"}, True))
 
 

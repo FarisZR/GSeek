@@ -3,7 +3,7 @@
 GSeek has three small process boundaries:
 
 1. **GTK4/libadwaita app:** a normal single-instance GNOME application. It calls the background service over the session bus. GTK objects stay on the main thread; network and database work stay off it.
-2. **Background service:** owns `io.github.FarisZR.GSeek.Service`, exports GNOME’s `SearchProvider2` plus a private JSON control interface, and survives the window closing. D-Bus activation and XDG autostart handle its lifecycle without user systemd configuration.
+2. **Background service:** owns `com.fariszr.gseek.Service`, exports GNOME’s `SearchProvider2` plus a private JSON control interface, and survives the window closing. D-Bus activation and XDG autostart handle its lifecycle without user systemd configuration.
 3. **Upstream inference runtime:** an unmodified, version-pinned `llama-server` process with its native multimodal embedding API over an owner-only Unix socket. No TCP listener is opened. Separate query and indexing processes prevent a long media job from blocking queries. Workers exit with their parent, have startup/request deadlines, and release models when idle.
 
 ## Discovery and indexing
@@ -89,43 +89,41 @@ never inferred from an OpenAI-compatible text endpoint.
 
 ## Desktop and packaging
 
-GNOME Shell reads search-provider definitions from system data directories,
-**not** the user data directory. Homebrew installs the static, default-disabled
-provider into `/usr/local/share/gnome-shell/search-providers`. This is the only
-system registration. Per-user app entries, icons, activation, and autostart use
-stable absolute launcher paths under `~/.local/share/gseek-app`.
+The application identity is `com.fariszr.gseek`. Flatpak installs the desktop
+entry, icons, GApplication activation, background service activation, and GNOME
+search-provider definition under `/app/share`. Flatpak exports and rewrites these
+files into the host’s normal XDG discovery paths. Flatpak exports the provider disabled by
+default; users enable it in GNOME Settings, which controls provider selection. GSeek opens that panel using
+GNOME Settings’ documented `launch-panel` GApplication action. It never writes
+host dconf or installs privileged registration files.
 
-Integration tracks checksums and the previous Files/GSeek provider settings.
-Uninstallation removes only unchanged owned files and restores only those settings
-it changed. Index data survives. The launcher uses host GTK/GLib/LocalSearch; it
-does not override those libraries with Homebrew copies. GSeek reuses
-optional readers from the host, preferring `/usr/bin` over Homebrew. The cask
-only supplies OpenSSL 3 when the host lacks that ABI. Its compatibility path is
-passed to the inference child only when needed. All inference backends are
-downloaded directly from official llama.cpp release assets. The embedded `data/runtimes.json` pins release URLs, exact sizes,
-and checksums for CPU, Vulkan, and CUDA on both architectures. CUDA includes its
-upstream redistributable libraries. GSeek verifies downloads, serializes installation,
-and atomically installs each backend. The app does not compile, patch, or rehost
-inference engines. Private sockets and child-only library paths isolate the
-runtime from the native GNOME process.
+Setup requests background/autostart permission through the Background portal,
+with `gseek service` as its login command. Denied permission is shown as an error.
+The service watches Flatpak’s `/app/.updated` deployment marker. Its creation triggers the existing graceful restart contract: finish queued
+preference saves, close the old UI/service, and reactivate through host D-Bus so
+the latest deployment is used. A remote-only update does not interrupt work.
 
-The welcome icon loads directly from an embedded PNG resource, independent of icon
-installation, SVG loaders, and stale theme caches. Desktop entries reference an
-owned, installed PNG by absolute path. Icon files participate in the same upgrade
-and uninstall manifest as other desktop registrations.
-The small set of UI symbolics is embedded from Adwaita 51, so controls and activity
-states also work without an installed icon theme. File results keep their native
-GIO icons and thumbnails.
+The GNOME 51 platform supplies GTK, libadwaita, TinySPARQL, FFmpeg, unzip, OpenSSL 3,
+and host-matched graphics extensions. Poppler’s CLI readers are packaged in the
+app. Host files are read-only; indexing still requires LocalSearch membership and
+all scope/exclusion checks. Portals handle opening files and selecting folders.
+No host executable spawning or unrestricted D-Bus permission is needed.
 
-Registration replaces live processes through their session-bus interfaces: it
-asks the window to close, lets pending preference saves finish, waits for the
-captured window/provider owners to release their names, and writes registration.
-Configured installations reactivate the provider through D-Bus and reopen the
-previous window at the stable installed launcher path. `gseek restart` and the
-main menu use the same lifecycle. Both the UI and provider have D-Bus activation
-entries so replacement processes start in the desktop session, outside the
-package manager's sandbox. No process-name matching or inference fallback
-is involved. Status includes the running provider version for diagnostics.
+The embedded `data/runtimes.json` pins official llama.cpp release URLs, sizes, and
+checksums for CPU, Vulkan, and CUDA on both architectures. CUDA includes upstream
+redistributable libraries. Downloads are verified and installed atomically into
+Flatpak’s persistent app data. Child-only library paths isolate the inference
+runtime from the GNOME process. No inference engine or GPU SDK is compiled.
+
+The welcome icon and all control icons are embedded in GResource. The desktop
+icon is exported under the application ID. Flatpak owns their installation and
+removal. Existing Flatpak data survives normal updates; there is no legacy data
+import or distribution migration layer.
+
+The separate `FarisZR/flatpak` repository signs app commits and repository metadata,
+validates Pages limits against actual OSTree objects, and deploys the complete
+repository atomically. Models, inference archives, and static deltas are not
+hosted there. Both architectures share one install URL.
 
 ## Native setup
 

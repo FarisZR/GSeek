@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GSeek
+Comment=Find your files by what you remember
+Exec=gseek
+Icon=com.fariszr.gseek
+Terminal=false
+Categories=GNOME;GTK;Utility;
+Keywords=Search;Files;Semantic;
+StartupNotify=true
+DBusActivatable=true

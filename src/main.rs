@@ -16,13 +16,6 @@ struct Args {
 enum Action {
     /// Run background indexing and the D-Bus search provider (no display required).
     Service,
-    /// Register this installation with the current user's GNOME session.
-    Integrate {
-        #[arg(long)]
-        launcher: Option<PathBuf>,
-    },
-    /// Remove owned desktop integration and restore the previous Files provider setting.
-    Unintegrate,
     /// Print indexing and model status.
     Status,
     /// Search the library from a terminal.
@@ -30,7 +23,11 @@ enum Action {
     /// Show all matching files in the native results view.
     Results { query: String },
     /// Restart the installed app and its background search service.
-    Restart,
+    Restart {
+        /// Keep the window closed when applying an installed update.
+        #[arg(long)]
+        background: bool,
+    },
     /// Verify/download the pinned model (for CI and diagnostics).
     PrepareModel,
     /// Test real local inference without a desktop session.
@@ -54,17 +51,6 @@ fn run() -> Result<()> {
     paths.init()?;
     match args.command {
         Some(Action::Service) => service::run(paths),
-        Some(Action::Integrate { launcher }) => {
-            let launcher = match launcher {
-                Some(path) => path,
-                None => service::launcher()?,
-            };
-            gseek::lifecycle::integrate(&paths, &launcher)
-        }
-        Some(Action::Unintegrate) => {
-            service::stop_running()?;
-            gseek::integration::uninstall(&paths)
-        }
         Some(Action::Status) => {
             println!(
                 "{}",
@@ -80,7 +66,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some(Action::Results { query }) => open_ui(paths, Some(query)),
-        Some(Action::Restart) => gseek::lifecycle::restart(),
+        Some(Action::Restart { background }) => gseek::lifecycle::restart(background),
         Some(Action::PrepareModel) => gseek::model::ensure(&paths, |_, _, _| Ok(())),
         Some(Action::Embed { text, image, audio }) => {
             let settings = paths.load()?;

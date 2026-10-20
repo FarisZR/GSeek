@@ -1,10 +1,9 @@
 //! Replace the running desktop and provider through their session-bus contracts.
-use crate::{APP_ID, BUS_NAME, CONTROL_IFACE, CONTROL_PATH, config::Paths};
+use crate::{APP_ID, BUS_NAME, CONTROL_IFACE, CONTROL_PATH};
 use anyhow::{Context, Result, bail};
 use glib::variant::ToVariant;
 use std::{
     collections::HashMap,
-    path::Path,
     time::{Duration, Instant},
 };
 
@@ -53,7 +52,7 @@ fn stop_window(connection: &gio::DBusConnection) -> Result<bool> {
     connection
         .call_sync(
             Some(&previous),
-            "/io/github/FarisZR/GSeek",
+            "/com/fariszr/gseek",
             "org.gtk.Actions",
             "Activate",
             Some(
@@ -113,40 +112,13 @@ fn activate(connection: &gio::DBusConnection, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn restart() -> Result<()> {
+pub fn restart(background: bool) -> Result<()> {
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
-    stop_window(&connection)?;
+    let visible = stop_window(&connection)?;
     stop_service(&connection)?;
-    // The new window activates the provider through its registered D-Bus service.
-    activate(&connection, APP_ID)
-}
-
-pub fn integrate(paths: &Paths, launcher: &Path) -> Result<()> {
-    // Installation also works outside a desktop session (for example over SSH).
-    let connection = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
-        Ok(connection) => Some(connection),
-        Err(error) if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() => {
-            return Err(error).context("Cannot connect to the desktop session to apply the update");
-        }
-        Err(_) => None,
-    };
-    let reopen = if let Some(connection) = &connection {
-        let reopen = stop_window(connection)?;
-        stop_service(connection)?;
-        reopen
-    } else {
-        false
-    };
-    crate::integration::install(paths, launcher)?;
-    if let Some(connection) = connection {
-        if paths.load()?.configured {
-            // D-Bus starts the installed provider in the desktop session environment,
-            // rather than leaving a service inside Homebrew's installation sandbox.
-            activate(&connection, BUS_NAME)?;
-        }
-        if reopen {
-            activate(&connection, APP_ID)?;
-        }
+    activate(&connection, BUS_NAME)?;
+    if visible || !background {
+        activate(&connection, APP_ID)?;
     }
     Ok(())
 }

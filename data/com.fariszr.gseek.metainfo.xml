@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.fariszr.gseek</id>
+  <name>GSeek</name>
+  <summary>Find your files by what you remember</summary>
+  <developer id="com.fariszr"><name>FarisZR</name></developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <launchable type="desktop-id">com.fariszr.gseek.desktop</launchable>
+  <description>
+    <p>Search documents, pictures, and recordings privately from GNOME Activities. Describe what you remember in your own language, or search filenames through GNOME’s existing file index.</p>
+    <p>GSeek downloads its verified EmbeddingGemma 2 model and inference runtime during setup. Choose CPU, Vulkan, or NVIDIA CUDA. No account or cloud inference is required.</p>
+  </description>
+  <url type="homepage">https://github.com/FarisZR/GSeek</url>
+  <url type="bugtracker">https://github.com/FarisZR/GSeek/issues</url>
+  <url type="vcs-browser">https://github.com/FarisZR/GSeek</url>
+  <content_rating type="oars-1.1"/>
+  <screenshots><screenshot type="default"><caption>GSeek setup</caption><image>https://raw.githubusercontent.com/FarisZR/GSeek/main/docs/screenshots/welcome.png</image></screenshot></screenshots>
+  <releases><release version="0.2.0" date="2026-10-19"><description><p>Native Flatpak distribution, background portal integration, and automatic restart after installed updates.</p></description></release></releases>
+</component>

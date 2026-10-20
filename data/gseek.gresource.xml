@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/io/github/FarisZR/GSeek">
-    <file>icons/512x512/apps/io.github.FarisZR.GSeek.png</file>
+  <gresource prefix="/com/fariszr/gseek">
+    <file>icons/512x512/apps/com.fariszr.gseek.png</file>
     <file>icons/scalable/actions/applications-engineering-symbolic.svg</file>
     <file>icons/scalable/actions/dialog-warning-symbolic.svg</file>
     <file>icons/scalable/actions/drive-harddisk-symbolic.svg</file>

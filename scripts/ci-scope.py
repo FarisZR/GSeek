@@ -10,14 +10,16 @@ INFERENCE_PATHS = {
     "src/inference.rs", "src/managed_runtime.rs", "src/model.rs",
     "src/local_http.rs", "src/cancellation.rs", "src/extract.rs",
     "data/runtimes.json", "data/reference-embedding.json",
-    "tests/real_inference.rs", "scripts/ci-deps.sh",
+    "tests/real_inference.rs", "scripts/ci-deps.sh", "build-aux/com.fariszr.gseek.json",
 }
 DESKTOP_DEPENDENCIES = {"gtk", "adw", "gio", "glib", "clap", "rusqlite", "unicode-normalization"}
 
 
 def requires_search(paths, inference):
-    return inference or any(path.startswith("src/") or path in {
-        "Cargo.toml", "Cargo.lock", "tests/e2e.py", "tests/run-e2e.sh", "tests/shell.py"
+    return inference or any(path.startswith(("src/", "build-aux/", "data/com.fariszr.gseek")) or path in {
+        "Cargo.toml", "Cargo.lock", "tests/e2e.py", "tests/run-e2e.sh", "tests/shell.py",
+        "tests/install-fixture.py", "tests/flatpak-fixture.py", "tests/flatpak-data.py",
+        ".github/workflows/ci.yml"
     } for path in paths)
 
 
