@@ -107,14 +107,19 @@ performance: representative AMD/NVIDIA hardware still needs validation.
 Bump the version in Cargo.toml, Cargo.lock, and the AppStream release metadata.
 After the exact commit passes CI on `main`, the Release workflow builds both
 Flatpak architectures, installs each exact package, and checks real CPU and
-software-Vulkan reference embeddings before publishing bundles and SHA256SUMS.
+software-Vulkan reference embeddings before publishing `gseek.flatpakref`,
+repository inputs, and SHA256SUMS.
 Tags and manual releases are also supported. Published versions keep their
 verified assets; reruns can finish an existing draft. The separate [distribution repository](https://github.com/FarisZR/flatpak)
-imports these immutable bundles, signs OSTree app commits and summary metadata,
+imports the immutable repository-input archive, signs OSTree app commits and summary metadata,
 checks Cloudflare Pages limits, and deploys `flatpak.fariszr.com`. It prunes
 unreachable objects while retaining up to three commit parents, and creates no
 static deltas. Models and runtimes continue to
 download directly from upstream.
+
+The `.flatpakref` is the downloadable installer. The repository-input archive is
+for publication, where commits and metadata receive their signatures. Only the
+distribution repository needs the private signing key.
 
 Normal Flatpak updates preserve settings, indexes, and downloads. The Background
 portal owns login startup; Flatpak owns exported desktop integration. The app’s

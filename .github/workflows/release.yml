@@ -80,10 +80,7 @@ jobs:
           flatpak --user install --or-update -y --noninteractive gseek-ci com.fariszr.gseek
           test "$(flatpak info --user --show-commit com.fariszr.gseek)" = "$(ostree --repo=flatpak-repo rev-parse app/com.fariszr.gseek/${{ matrix.arch }}/stable)"
           bash tests/flatpak-smoke.sh
-          flatpak build-bundle --repo-url=https://flatpak.fariszr.com/repo \
-            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-            --gpg-keys=build-aux/fariszr.gpg \
-            flatpak-repo gseek-${{ matrix.arch }}.flatpak com.fariszr.gseek stable
+          flatpak build-bundle flatpak-repo gseek-${{ matrix.arch }}.flatpak com.fariszr.gseek stable
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.arch }}
@@ -106,17 +103,18 @@ jobs:
           pattern: release-*
           path: release
           merge-multiple: true
-      - name: Publish verified Flatpak bundles
+      - name: Publish Flatpak installer and verified repository inputs
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          (cd release && sha256sum gseek-*.flatpak > SHA256SUMS)
+          python3 scripts/release-assets.py --bundles release --output release/public
+          (cd release/public && sha256sum gseek.flatpakref gseek-repository-inputs.tar > SHA256SUMS)
           if gh release view "v$version" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
-            gh release upload "v$version" release/* --clobber
+            gh release upload "v$version" release/public/* --clobber
             gh release edit "v$version" --draft=false --title "GSeek $version"
           else
-            gh release create "v$version" release/* --target "$RELEASE_SHA" --title "GSeek $version" --generate-notes
+            gh release create "v$version" release/public/* --target "$RELEASE_SHA" --title "GSeek $version" --generate-notes
           fi
