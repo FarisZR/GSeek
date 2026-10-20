@@ -39,7 +39,7 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
   native:
     needs: scope
-    name: GNOME 51 / ${{ matrix.platform.distro }} / ${{ matrix.backend }}
+    name: GNOME 51 / ${{ matrix.platform.distro }}
     runs-on: ubuntu-24.04
     container:
       image: ${{ matrix.platform.image }}
@@ -48,7 +48,7 @@ jobs:
     env:
       GSK_RENDERER: cairo
       GSEEK_TEST_SHELL: '1'
-      GSEEK_TEST_BACKEND: ${{ matrix.backend }}
+      GSEEK_TEST_BACKEND: cpu
       GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
       GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
       GSEEK_GUI_TEST_COMMAND: cargo test --lib ui::tests::native_views -- --ignored --test-threads=1
@@ -57,13 +57,14 @@ jobs:
       XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
       GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
       GSEEK_INFERENCE_TIMEOUT: '300'
+    # The shared Flatpak platform checks CPU and Vulkan below on both architectures.
+    # Native jobs cover readers, recovery, search, and GTK on each target distro.
     strategy:
       fail-fast: false
       matrix:
         platform:
           - { distro: ubuntu-26.10, image: 'ubuntu:26.10' }
           - { distro: fedora-45, image: 'fedora:45' }
-        backend: ${{ fromJSON(needs.scope.outputs.inference == 'true' && '["cpu","vulkan"]' || '["cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,8 +87,8 @@ jobs:
             ~/.cargo/git
             target
             ${{ needs.scope.outputs.search == 'true' && '.ci-data/gseek' || '' }}
-          key: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && matrix.backend || 'build' }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
-          restore-keys: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && matrix.backend || 'build' }}-
+          key: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && 'cpu' || 'build' }}-${{ hashFiles('Cargo.lock', 'data/runtimes.json') }}
+          restore-keys: native-${{ matrix.platform.distro }}-${{ needs.scope.outputs.search == 'true' && 'cpu' || 'build' }}-
       - name: Check formatting and lint
         run: |
           cargo fmt --check
@@ -103,12 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$XDG_CONFIG_HOME/gseek" artifacts
-          printf '{"backend":"%s"}\n' '${{ matrix.backend }}' > "$XDG_CONFIG_HOME/gseek/settings.json"
-          if [[ '${{ matrix.backend }}' == vulkan ]]; then
-            export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
-            vulkaninfo --summary
-            echo "VK_DRIVER_FILES=$VK_DRIVER_FILES" >> "$GITHUB_ENV"
-          fi
+          printf '{"backend":"%s"}\n' cpu > "$XDG_CONFIG_HOME/gseek/settings.json"
       - name: Test real embeddings and backend recovery
         if: needs.scope.outputs.inference == 'true'
         shell: bash
@@ -127,7 +123,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: evidence-${{ matrix.platform.distro }}-${{ matrix.backend }}
+          name: evidence-${{ matrix.platform.distro }}-cpu
           path: |
             artifacts/
             gnome-version.txt
@@ -189,7 +185,9 @@ jobs:
           runuser -u gseek-ci -- bash -c '
             set -euo pipefail
             flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+            ostree --repo=artifacts/flatpak-repo init --mode=archive-z2
             flatpak build-import-bundle artifacts/flatpak-repo artifacts/package/gseek-x86_64.flatpak
+            flatpak build-update-repo artifacts/flatpak-repo
             flatpak remote-add --user --no-gpg-verify gseek-ci "$PWD/artifacts/flatpak-repo"
             flatpak install --user --noninteractive -y gseek-ci com.fariszr.gseek
             xvfb-run -a bash tests/run-e2e.sh 2>&1 | tee artifacts/flatpak-e2e.log
