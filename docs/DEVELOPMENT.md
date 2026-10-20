@@ -59,8 +59,9 @@ GSEEK_TEST_INFERENCE=true bash tests/flatpak-smoke.sh
 ```
 
 The installed Flatpak smoke test checks packaged readers and dynamic linking,
-then downloads the real model/runtime and compares the CPU encoder to the pinned
-768-dimensional reference vector. Both architectures run it on releases.
+then downloads the real model/runtime and compares CPU and software Vulkan to
+the pinned 768-dimensional reference vector. Both architectures run these checks
+on releases and on relevant pull requests.
 
 Real inference, multimodal readers, and recovery:
 
@@ -88,10 +89,14 @@ To test an installed development Flatpak instead, set `GSEEK_TEST_FLATPAK=1`
 and omit `GSEEK_GUI_TEST_COMMAND`. This uses Flatpak’s actual exported activation,
 provider, and desktop files. Run only in a disposable account/container: the
 fixture temporarily sets and then resets that app’s per-user test overrides.
+Set `GSEEK_TEST_UPDATE_REPO` to that disposable installation’s local update
+repository to verify that an installed update replaces both the running service
+and its open window while preserving settings and search.
 
 CI always runs lint, unit contracts, and both Flatpak builds. Source search/UI
-changes also run the CPU integration suite on Fedora and Ubuntu. Long software
-Vulkan and embedding stress tests run only for inference, model, reader, runtime,
+changes also run native and installed-package CPU integration on Fedora and
+Ubuntu. Real-model stress tests and packaged CPU/software-Vulkan reference checks
+run only for inference, model, reader, runtime,
 packaging, or relevant dependency changes. Version and GTK updates alone do not
 trigger Vulkan. `scripts/ci-scope.py` defines and tests this boundary. Manual CI
 runs the full suite. Green CPU/software-Vulkan CI does not establish physical GPU
@@ -99,12 +104,16 @@ performance: representative AMD/NVIDIA hardware still needs validation.
 
 ## Releases
 
-The Release workflow builds both Flatpak architectures, installs each exact
-package, and checks real CPU reference embeddings before publishing bundles and
-SHA256SUMS. The separate [distribution repository](https://github.com/FarisZR/flatpak)
+Bump the version in Cargo.toml, Cargo.lock, and the AppStream release metadata.
+After the exact commit passes CI on `main`, the Release workflow builds both
+Flatpak architectures, installs each exact package, and checks real CPU and
+software-Vulkan reference embeddings before publishing bundles and SHA256SUMS.
+Tags and manual releases are also supported. Published versions keep their
+verified assets; reruns can finish an existing draft. The separate [distribution repository](https://github.com/FarisZR/flatpak)
 imports these immutable bundles, signs OSTree app commits and summary metadata,
-checks Cloudflare Pages limits, and deploys `flatpak.fariszr.com`. It retains three
-object generations and creates no static deltas. Models and runtimes continue to
+checks Cloudflare Pages limits, and deploys `flatpak.fariszr.com`. It prunes
+unreachable objects while retaining up to three commit parents, and creates no
+static deltas. Models and runtimes continue to
 download directly from upstream.
 
 Normal Flatpak updates preserve settings, indexes, and downloads. The Background

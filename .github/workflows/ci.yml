@@ -49,13 +49,7 @@ jobs:
       GSK_RENDERER: cairo
       GSEEK_TEST_SHELL: '1'
       GSEEK_TEST_BACKEND: cpu
-      GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
-      GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
       GSEEK_GUI_TEST_COMMAND: cargo test --lib ui::tests::native_views -- --ignored --test-threads=1
-      XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
-      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
-      XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
-      GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
       GSEEK_INFERENCE_TIMEOUT: '300'
     # The shared Flatpak platform checks CPU and Vulkan below on both architectures.
     # Native jobs cover readers, recovery, search, and GTK on each target distro.
@@ -69,6 +63,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set disposable integration paths
+        shell: bash
+        run: |
+          printf '%s\n' \
+            "XDG_DATA_HOME=$PWD/.ci-data" \
+            "XDG_CONFIG_HOME=$PWD/.ci-config" \
+            "XDG_CACHE_HOME=$PWD/.ci-cache" \
+            "GSEEK_TEST_MODEL_CACHE=$PWD/.ci-data/gseek/models" \
+            "GSEEK_TEST_RUNTIME_CACHE=$PWD/.ci-data/gseek/runtimes" \
+            "GSEEK_SCREENSHOT_DIR=$PWD/artifacts/screenshots" >> "$GITHUB_ENV"
       - name: Install native dependencies
         run: bash scripts/ci-deps.sh
       - name: Install pinned Rust
@@ -149,17 +153,21 @@ jobs:
       GSETTINGS_BACKEND: keyfile
       GSEEK_TEST_SHELL: '1'
       GSEEK_TEST_BACKEND: cpu
-      GSEEK_TEST_MODEL_CACHE: ${{ github.workspace }}/.ci-data/gseek/models
-      GSEEK_TEST_RUNTIME_CACHE: ${{ github.workspace }}/.ci-data/gseek/runtimes
-      GSEEK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/screenshots
-      XDG_DATA_HOME: ${{ github.workspace }}/.ci-data
-      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
-      XDG_CACHE_HOME: ${{ github.workspace }}/.ci-cache
       GSEEK_INFERENCE_TIMEOUT: '300'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set disposable integration paths
+        shell: bash
+        run: |
+          printf '%s\n' \
+            "XDG_DATA_HOME=$PWD/.ci-data" \
+            "XDG_CONFIG_HOME=$PWD/.ci-config" \
+            "XDG_CACHE_HOME=$PWD/.ci-cache" \
+            "GSEEK_TEST_MODEL_CACHE=$PWD/.ci-data/gseek/models" \
+            "GSEEK_TEST_RUNTIME_CACHE=$PWD/.ci-data/gseek/runtimes" \
+            "GSEEK_SCREENSHOT_DIR=$PWD/artifacts/screenshots" >> "$GITHUB_ENV"
       - name: Install GNOME test dependencies
         run: bash scripts/ci-deps.sh
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -175,10 +183,10 @@ jobs:
           GSETTINGS_BACKEND: keyfile
           GSEEK_TEST_FLATPAK: '1'
           GSEEK_GUI_TEST_COMMAND: ''
-          GSEEK_TEST_UPDATE_REPO: ${{ github.workspace }}/artifacts/flatpak-repo
         shell: bash
         run: |
           set -euo pipefail
+          export GSEEK_TEST_UPDATE_REPO="$PWD/artifacts/flatpak-repo"
           useradd --create-home --uid 1001 gseek-ci
           mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
           chown -R gseek-ci:gseek-ci "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" artifacts
