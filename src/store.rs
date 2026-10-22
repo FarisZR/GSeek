@@ -46,6 +46,13 @@ pub struct SearchHit {
     pub score: f64,
 }
 
+/// A query embedding and the pipeline that produced it must travel together.
+pub struct SearchQuery<'a> {
+    pub text: &'a str,
+    pub vector: &'a [f32],
+    pub pipeline: &'a str,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Counts {
     pub files: u64,
@@ -593,13 +600,12 @@ impl Store {
 
     pub fn search(
         &self,
-        query: &str,
-        vector: &[f32],
-        pipeline: &str,
+        query: SearchQuery<'_>,
         settings: &Settings,
+        filenames: &[FileRecord],
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let terms: Vec<String> = folded(query.trim())
+        let terms: Vec<String> = folded(query.text.trim())
             .split_whitespace()
             .take(32)
             .map(str::to_string)
@@ -607,10 +613,26 @@ impl Store {
         if terms.is_empty() {
             return Ok(vec![]);
         }
-        validate_vector(vector)?;
+        validate_vector(query.vector)?;
         let limit = limit.clamp(1, MAX_RESULTS);
         let mut hits = HashMap::<String, SearchHit>::new();
-        let mut best_semantic = 0.0_f64;
+        // Collect every source before scoring or truncating. A filename from
+        // LocalSearch may corroborate a content candidate below its own top N.
+        for file in filenames {
+            hits.insert(
+                file.uri.clone(),
+                SearchHit {
+                    uri: file.uri.clone(),
+                    path: file.path.clone(),
+                    name: file.name.clone(),
+                    mime: file.mime.clone(),
+                    snippet: String::new(),
+                    page: None,
+                    seconds: None,
+                    score: crate::ranking::filename(query.text, &file.name, &file.path),
+                },
+            );
+        }
         // Bound candidates, but preserve AND matching for filenames/paths.
         let mut sql = "SELECT uri,path,name,mime FROM files WHERE ".to_owned();
         for i in 0..terms.len() {
@@ -619,17 +641,12 @@ impl Store {
             }
             sql.push_str(&format!("instr(folded,?{})>0", i + 1));
         }
-        sql.push_str(&format!(
-            " ORDER BY length(name),uri LIMIT {}",
-            limit.max(500)
-        ));
+        sql.push_str(&format!(" ORDER BY length(name),uri LIMIT {MAX_RESULTS}"));
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params_from_iter(&terms))?;
         while let Some(r) = rows.next()? {
-            let mut h = hit_row(r, "", None, None, 3.0)?;
-            if folded(&h.name) == terms.join(" ") {
-                h.score += 2.0;
-            }
+            let mut h = hit_row(r, "", None, None, 0.0)?;
+            h.score = crate::ranking::filename(query.text, &h.name, &h.path);
             keep_hit(&mut hits, h, settings);
         }
         let fts = terms
@@ -640,26 +657,31 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds FROM words
             JOIN chunks c ON c.id=words.rowid JOIN files f ON f.content=c.content
-            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {}",
-            limit.max(500)
+            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {MAX_RESULTS}"
         ))?;
-        for (rank, row) in stmt
-            .query_map([fts], |r| {
-                hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, 0.0)
-            })?
-            .enumerate()
-        {
+        let mut word_matches = std::collections::HashSet::new();
+        for row in stmt.query_map([fts], |r| {
+            hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, 0.0)
+        })? {
             let mut h = row?;
-            h.score = 2.0 + 1.0 / (rank as f64 + 1.0);
+            if !word_matches.insert(h.uri.clone()) {
+                continue;
+            }
+            // BM25 orders content candidates; count files rather than chunks so
+            // a long document cannot push down every file that follows it.
+            h.score = (0.35 + 0.20 / word_matches.len() as f64)
+                .max(crate::ranking::filename(query.text, &h.name, &h.path));
             keep_hit(&mut hits, h, settings);
         }
+        let mut lexical_semantics = HashMap::<String, SearchHit>::new();
+        let mut best_semantic = 0.0_f64;
+        let mut semantic = SemanticCandidates::new(limit);
         {
-            let mut semantic = SemanticCandidates::new(limit);
-            let v = vector;
+            let v = query.vector;
             // Stream vectors from SQLite's bounded page cache; never materialize the vector database in memory.
             let mut stmt = self.conn.prepare("SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds,c.vector FROM chunks c
                 JOIN files f ON f.content=c.content JOIN contents p ON p.id=c.content WHERE c.vector IS NOT NULL AND p.pipeline=?1")?;
-            let mut rows = stmt.query([pipeline])?;
+            let mut rows = stmt.query([query.pipeline])?;
             while let Some(r) = rows.next()? {
                 let bytes: Vec<u8> = r.get(7)?;
                 if bytes.len() != DIMENSIONS * 4 {
@@ -672,7 +694,7 @@ impl Store {
                     .zip(v)
                     .map(|(b, q)| f32::from_le_bytes(*b) as f64 * *q as f64)
                     .sum();
-                if score < 0.30 || !score.is_finite() {
+                if score < crate::ranking::SEMANTIC_FLOOR || !score.is_finite() {
                     continue;
                 }
                 let path: String = r.get(1)?;
@@ -681,6 +703,18 @@ impl Store {
                 }
                 let uri: String = r.get(0)?;
                 if hits.contains_key(&uri) {
+                    if !search_path_allowed(Path::new(&path), settings) {
+                        continue;
+                    }
+                    if lexical_semantics
+                        .get(&uri)
+                        .is_none_or(|old| score > old.score)
+                    {
+                        lexical_semantics.insert(
+                            uri,
+                            hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, score)?,
+                        );
+                    }
                     best_semantic = best_semantic.max(score);
                     continue;
                 }
@@ -694,14 +728,30 @@ impl Store {
                 best_semantic = best_semantic.max(score);
                 semantic.insert(hit);
             }
-            hits.extend(semantic.hits);
         }
-        let mut hits: Vec<_> = hits.into_values().collect();
         // EmbeddingGemma's unrelated document pairs can still have positive cosine scores.
         // Preserve lexical hits, but omit weak semantic neighbours rather than filling the view.
         let cutoff = (best_semantic - 0.12).max(0.60);
+        for (uri, hit) in &mut hits {
+            let lexical = hit.score;
+            let matched = lexical_semantics.remove(uri).filter(|h| h.score >= cutoff);
+            let cosine = matched.as_ref().map(|h| h.score);
+            if let Some(semantic_hit) = matched {
+                // Opening a corroborated result should jump to its best semantic
+                // passage, even if its filename also matched the query.
+                *hit = semantic_hit;
+            }
+            hit.score = crate::ranking::combined(lexical, cosine);
+        }
+        let mut hits: Vec<_> = hits.into_values().collect();
+        for mut hit in semantic.hits.into_values().filter(|h| h.score >= cutoff) {
+            hit.score = crate::ranking::combined(0.0, Some(hit.score));
+            hits.push(hit);
+        }
+        // Filename-only locations (e.g. Downloads) follow GNOME's broader scope.
         hits.retain(|h| {
-            (h.score >= 2.0 || h.score >= cutoff) && search_path_allowed(&h.path, settings)
+            settings.allows_filename(&h.path)
+                && std::fs::canonicalize(&h.path).is_ok_and(|p| settings.allows_filename(&p))
         });
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
         hits.truncate(limit);
@@ -728,45 +778,11 @@ fn hit_row(
     })
 }
 
-pub fn merge_filename_matches(
-    hits: &mut Vec<SearchHit>,
-    files: Vec<FileRecord>,
-    query: &str,
-    limit: usize,
-) {
-    let query = folded(query.trim());
-    let mut by_uri: HashMap<_, _> = hits.drain(..).map(|hit| (hit.uri.clone(), hit)).collect();
-    for file in files {
-        let score = if folded(&file.name) == query {
-            5.0
-        } else {
-            3.0
-        };
-        if let Some(hit) = by_uri.get_mut(&file.uri) {
-            hit.score = hit.score.max(score);
-            continue;
-        }
-        by_uri.insert(
-            file.uri.clone(),
-            SearchHit {
-                uri: file.uri,
-                path: file.path,
-                name: file.name,
-                mime: file.mime,
-                snippet: String::new(),
-                page: None,
-                seconds: None,
-                score,
-            },
-        );
-    }
-    hits.extend(by_uri.into_values());
-    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
-    hits.truncate(limit.clamp(1, MAX_RESULTS));
-}
 fn keep_hit(hits: &mut HashMap<String, SearchHit>, h: SearchHit, settings: &Settings) {
-    if hits.get(&h.uri).is_some_and(|old| old.score >= h.score)
-        || !search_path_allowed(&h.path, settings)
+    if hits.get(&h.uri).is_some_and(|old| {
+        old.score > h.score
+            || (old.score == h.score && (!old.snippet.is_empty() || h.snippet.is_empty()))
+    }) || !search_path_allowed(&h.path, settings)
     {
         return;
     }
@@ -791,6 +807,13 @@ pub fn validate_vector(v: &[f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn query<'a>(text: &'a str, vector: &'a [f32], pipeline: &'a str) -> SearchQuery<'a> {
+        SearchQuery {
+            text,
+            vector,
+            pipeline,
+        }
+    }
     fn query_vector() -> Vec<f32> {
         let mut v = vec![0.0; DIMENSIONS];
         v[0] = 1.0;
@@ -816,6 +839,244 @@ mod tests {
             folder: false,
         };
         Ok((d, Store::open(Path::new(":memory:"))?, s, f))
+    }
+
+    fn chunk(cosine: f32, page: u32) -> StoredChunk {
+        let mut vector = vec![0.0; DIMENSIONS];
+        vector[0] = cosine;
+        vector[1] = (1.0 - cosine * cosine).sqrt();
+        StoredChunk {
+            text: format!("Passage {page}"),
+            vector: Some(vector),
+            page: Some(page),
+            seconds: None,
+        }
+    }
+
+    fn ranked_file(
+        dir: &Path,
+        store: &mut Store,
+        template: &FileRecord,
+        name: &str,
+        chunks: Vec<StoredChunk>,
+    ) -> Result<FileRecord> {
+        let mut file = template.clone();
+        file.name = Path::new(name)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into();
+        file.path = dir.join(name);
+        std::fs::create_dir_all(file.path.parent().unwrap())?;
+        std::fs::write(&file.path, "Ranking fixture")?;
+        file.uri = url::Url::from_file_path(&file.path).unwrap().into();
+        file.source_id = 0;
+        if !chunks.is_empty() {
+            store.discover(&file, 1)?;
+            store.save_content(name, "p", &chunks)?;
+            store.complete(&file.uri, name)?;
+        }
+        Ok(file)
+    }
+
+    #[test]
+    fn hybrid_ranking_prefers_intent_over_the_source_of_a_match() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let mut filenames = vec![];
+        for name in ["syntax.txt", "Tax archives.zip", "tax.txt"] {
+            filenames.push(ranked_file(
+                dir.path(),
+                &mut store,
+                &template,
+                name,
+                vec![],
+            )?);
+        }
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Fiscal.pdf",
+            vec![chunk(0.93, 2)],
+        )?;
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "tax/Unrelated.txt",
+            vec![chunk(0.40, 1)],
+        )?;
+        let mut word_match = chunk(0.45, 1);
+        word_match.text = "tax guidance".into();
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Keyword.txt",
+            vec![word_match],
+        )?;
+        let vector = query_vector();
+        let hits = store.search(query("tax", &vector, "p"), &settings, &filenames, 20)?;
+        assert_eq!(
+            hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            [
+                "tax.txt",
+                "Fiscal.pdf",
+                "Tax archives.zip",
+                "Keyword.txt",
+                "syntax.txt",
+                "Unrelated.txt"
+            ]
+        );
+        // Results must not depend on arrival order from LocalSearch or HashMap iteration.
+        filenames.reverse();
+        for limit in [1, 3, 20] {
+            let limited = store.search(query("tax", &vector, "p"), &settings, &filenames, limit)?;
+            assert_eq!(
+                limited.iter().map(|h| &h.uri).collect::<Vec<_>>(),
+                hits.iter().take(limit).map(|h| &h.uri).collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn corroborated_matches_retain_similarity_and_the_best_passage_before_limiting() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Unknown.pdf",
+            vec![chunk(0.85, 1)],
+        )?;
+        let both = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Tax notes.txt",
+            vec![chunk(0.72, 1), chunk(0.84, 7)],
+        )?;
+        let vector = query_vector();
+        let files = [both.clone(), both.clone()];
+        for limit in [1, 20] {
+            let hits = store.search(query("tax", &vector, "p"), &settings, &files, limit)?;
+            assert_eq!(hits[0].uri, both.uri);
+            assert_eq!(hits[0].page, Some(7));
+            assert_eq!(hits[0].snippet, "Passage 7");
+            assert_eq!(hits.iter().filter(|h| h.uri == both.uri).count(), 1);
+        }
+        // A weak semantic neighbour must not gain corroboration from an unrelated embedding.
+        let wrong_model = store.search(
+            query("tax", &vector, "other-pipeline"),
+            &settings,
+            &files,
+            20,
+        )?;
+        assert_eq!(wrong_model.len(), 1);
+        assert!(wrong_model[0].snippet.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn weak_embeddings_do_not_boost_lexical_matches_or_replace_their_passages() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Relevant.pdf",
+            vec![chunk(0.95, 1)],
+        )?;
+        let mut weak = chunk(0.61, 2);
+        weak.text = "tax text".into();
+        let file = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Tax guide.txt",
+            vec![weak],
+        )?;
+        let vector = query_vector();
+        let hits = store.search(query("tax", &vector, "p"), &settings, &[], 20)?;
+        assert_eq!(hits[0].name, "Relevant.pdf");
+        let lexical = hits.iter().find(|hit| hit.uri == file.uri).unwrap();
+        let lexical_only = store.search(query("tax", &vector, "other"), &settings, &[], 20)?;
+        assert_eq!(lexical.score, lexical_only[0].score);
+        assert_eq!(lexical.snippet, "tax text");
+        Ok(())
+    }
+
+    #[test]
+    fn filename_only_locations_and_exclusions_survive_joint_ranking() -> Result<()> {
+        let (dir, mut store, mut settings, template) = fixture()?;
+        settings.folders = vec![dir.path().join("Documents")];
+        let mut files = vec![];
+        for name in [
+            "Downloads/Tax.zip",
+            "Downloads/.Tax.txt",
+            "Downloads/Tax.pem",
+            "Private/Tax.txt",
+        ] {
+            files.push(ranked_file(
+                dir.path(),
+                &mut store,
+                &template,
+                name,
+                vec![],
+            )?);
+        }
+        settings.excluded_folders.push(dir.path().join("Private"));
+        let vector = query_vector();
+        let hits = store.search(query("tax", &vector, "p"), &settings, &files, 20)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "Tax.zip");
+        assert_eq!(store.counts()?.files, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unicode_titles_and_whole_words_outrank_partial_names() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let mut files = vec![];
+        for name in [
+            "Annual_Report.pdf",
+            "Annual Report Archive.zip",
+            "Annually Reporting.txt",
+            "الفاتورة.pdf",
+        ] {
+            files.push(ranked_file(
+                dir.path(),
+                &mut store,
+                &template,
+                name,
+                vec![],
+            )?);
+        }
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Other.pdf",
+            vec![chunk(0.99, 1)],
+        )?;
+        let vector = query_vector();
+        let hits = store.search(
+            query("Ａｎｎｕａｌ Report", &vector, "p"),
+            &settings,
+            &files[..3],
+            20,
+        )?;
+        assert_eq!(hits[0].name, "Annual_Report.pdf");
+        assert!(
+            hits.iter()
+                .position(|h| h.name == "Annual Report Archive.zip")
+                < hits.iter().position(|h| h.name == "Annually Reporting.txt")
+        );
+        let hits = store.search(query("الفاتورة", &vector, "p"), &settings, &files[3..], 20)?;
+        assert_eq!(hits[0].name, "الفاتورة.pdf");
+        Ok(())
     }
     #[test]
     fn exclusions_remove_queued_files_checkpoints_vectors_and_stale_scan_writes() -> Result<()> {
@@ -892,18 +1153,25 @@ mod tests {
             store.complete(&f.uri, "hash")?;
         }
         let store = Store::open(&db)?;
-        assert_eq!(store.search("lease", &query_vector(), "", &s, 20)?.len(), 1);
         assert_eq!(
-            store.search("cats welcome", &query_vector(), "", &s, 20)?[0].page,
+            store
+                .search(query("lease", &query_vector(), ""), &s, &[], 20)?
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.search(query("cats welcome", &query_vector(), ""), &s, &[], 20)?[0].page,
             Some(2)
         );
         assert_eq!(
-            store.search("الفاتورة", &query_vector(), "", &s, 20)?.len(),
+            store
+                .search(query("الفاتورة", &query_vector(), ""), &s, &[], 20)?
+                .len(),
             1
         );
         assert!(
             store
-                .search("cats unknown", &query_vector(), "", &s, 20)?
+                .search(query("cats unknown", &query_vector(), ""), &s, &[], 20)?
                 .is_empty()
         );
         Ok(())
@@ -958,11 +1226,11 @@ mod tests {
             ],
         )?;
         store.complete(&f.uri, "h")?;
-        assert_eq!(store.search("pets", &v, "p", &s, 20)?.len(), 1);
-        assert!(store.search("lease.txt", &v, "p", &s, 20)?[0].score > 4.0);
+        assert_eq!(store.search(query("pets", &v, "p"), &s, &[], 20)?.len(), 1);
+        assert!(store.search(query("lease.txt", &v, "p"), &s, &[], 20)?[0].score > 1.0);
         assert!(
             store
-                .search("concept", &v, "different-model", &s, 20)?
+                .search(query("concept", &v, "different-model"), &s, &[], 20)?
                 .is_empty()
         );
         Ok(())
@@ -1016,7 +1284,7 @@ mod tests {
             store.discover(&file, 1)?;
             store.complete(&file.uri, "shared")?;
         }
-        let hits = store.search("concept", &vector, "p", &settings, 900)?;
+        let hits = store.search(query("concept", &vector, "p"), &settings, &[], 900)?;
         assert_eq!(hits.len(), 900);
         assert_eq!(hits.first().unwrap().name, "Entry 0000.txt");
         assert_eq!(hits.last().unwrap().name, "Entry 0899.txt");

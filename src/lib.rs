@@ -9,6 +9,7 @@ mod local_http;
 mod managed_runtime;
 pub mod model;
 pub mod portals;
+mod ranking;
 pub mod service;
 pub mod store;
 #[cfg(feature = "gui")]

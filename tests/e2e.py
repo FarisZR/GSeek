@@ -142,6 +142,61 @@ class EndToEnd(unittest.TestCase):
         refined = self.invoke("GetSubsearchResultSet", GLib.Variant("(asas)", (ids, ["pets", "in", "lease"])), SHELL_IFACE, PROVIDER)[0]
         self.assertTrue(refined)
 
+    def test_01c_exact_filename_beyond_candidate_budget_matches_show_all(self):
+        downloads = ROOT / "AAA-Ranking"
+        downloads.mkdir()
+        paths = [downloads / f"A-rankcheckpart-{i:04}.zip" for i in range(5005)]
+        exact = downloads / "Z" / "rankcheck.zip"
+        exact.parent.mkdir()
+        paths.append(exact)
+        try:
+            for path in paths:
+                path.write_text("Not embedded.")
+            triples = " ".join(
+                f'<{p.as_uri()}> a nfo:FileDataObject ; nie:url {json.dumps(p.as_uri())} ; nfo:fileName {json.dumps(p.name)} .'
+                for p in paths)
+            self.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ {triples} }} }}', None)
+            query = "rankcheck"
+            for limit in [1, 20, 5000]:
+                hits = json.loads(self.invoke("Search", GLib.Variant("(su)", (query, limit)))[0])
+                self.assertEqual(hits[0]["uri"], exact.as_uri(), hits[:3])
+            ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", ([query],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertEqual(ids[0], exact.as_uri())
+        finally:
+            self.conn.update(
+                'DELETE { GRAPH tracker:FileSystem { ?f ?p ?o } } WHERE { '
+                'GRAPH tracker:FileSystem { ?f ?p ?o . '
+                f'FILTER(STRSTARTS(STR(?f), {json.dumps(downloads.as_uri() + "/")})) }} }}', None)
+            for path in paths:
+                path.unlink(missing_ok=True)
+            exact.parent.rmdir()
+            downloads.rmdir()
+
+    def test_01b_hybrid_ranking_beats_incidental_gnome_names_in_activities(self):
+        # This URI sorts before Documents, reproducing the old score-3 filename
+        # tie that displaced an actually relevant document by filesystem order.
+        downloads = ROOT / "AAA-Downloads"
+        downloads.mkdir()
+        incidental = downloads / "petsupply.zip"
+        incidental.write_text("Never embedded: outside content locations.")
+        self.add(incidental)
+        try:
+            hits = self.search("pets")
+            self.assertEqual(hits[0]["name"], "Rental Agreement.txt", hits)
+            self.assertIn(incidental.as_uri(), [h["uri"] for h in hits])
+            self.assertGreater(hits[0]["score"], next(h["score"] for h in hits if h["uri"] == incidental.as_uri()))
+            ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", (["pets"],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertEqual(ids, [h["uri"] for h in hits[:len(ids)]])
+            limited = json.loads(self.invoke("Search", GLib.Variant("(su)", ("pets", 1)))[0])
+            self.assertEqual(limited[0]["uri"], hits[0]["uri"])
+            self.assertEqual(self.search("petsupply.zip")[0]["uri"], incidental.as_uri())
+            with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
+                self.assertIsNone(db.execute("SELECT uri FROM files WHERE uri=?", (incidental.as_uri(),)).fetchone())
+        finally:
+            self.remove(incidental)
+            incidental.unlink()
+            downloads.rmdir()
+
     def test_02b_activating_a_result_uses_its_default_application(self):
         helper=ROOT / "capture-open.py"
         output=ROOT / "opened.json"

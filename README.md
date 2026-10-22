@@ -126,6 +126,13 @@ view automatically. The window is reused when another query arrives from
 Activities. Large result sets use a virtualized list; searches return up to 5,000
 matches and ask you to refine the query if that limit is reached.
 
+Results are ranked together by relevance. An exact filename or title takes
+priority. Strong meaning matches can outrank incidental words in a filename or
+folder path, and a file that matches both its name and its contents receives a
+boost. Whole words count more than partial names. Matching passages are preserved
+so opening a result still takes you to the relevant page or moment. Activities
+and **Show All Results** use the same ranking.
+
 <p align="center"><img src="docs/screenshots/results.png" width="640" alt="Native GSeek results showing seven filename matches from Downloads."></p>
 
 ## Default Exclusions
