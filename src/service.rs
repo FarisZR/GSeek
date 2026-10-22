@@ -565,28 +565,33 @@ impl SearchQueue {
                     if generation.load(Ordering::Relaxed) != job.generation {
                         return Ok(vec![]);
                     }
-                    let mut hits = Store::open(&paths.database())?.search(
-                        &job.query,
-                        &vector,
-                        &runtime.fingerprint(),
-                        &settings,
-                        job.limit,
-                    )?;
                     // LocalSearch remains the authority for ordinary filename results,
                     // including Downloads and formats without a content reader.
-                    match discovery::filename_matches(&job.query, &settings, job.limit) {
+                    let files = match discovery::filename_matches(
+                        &job.query,
+                        &settings,
+                        job.limit.max(500),
+                    ) {
                         Ok(files) => {
                             shared.lock().unwrap().filename_error.clear();
-                            crate::store::merge_filename_matches(
-                                &mut hits, files, &job.query, job.limit,
-                            );
+                            files
                         }
                         Err(e) => {
                             shared.lock().unwrap().filename_error =
                                 format!("GNOME filename search unavailable: {e:#}");
+                            vec![]
                         }
-                    }
-                    Ok(hits)
+                    };
+                    Store::open(&paths.database())?.search(
+                        crate::store::SearchQuery {
+                            text: &job.query,
+                            vector: &vector,
+                            pipeline: &runtime.fingerprint(),
+                        },
+                        &settings,
+                        &files,
+                        job.limit,
+                    )
                 })()
                 .map_err(|e| format!("{e:#}"));
                 let _ = job.reply.send_blocking(result);

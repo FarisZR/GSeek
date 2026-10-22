@@ -37,14 +37,29 @@ Search requires a validated embedding. GNOME LocalSearch supplies ordinary filen
 results across its existing scope, including files outside the embedding folders.
 These results are stat-checked against privacy and explicit exclusion rules,
 deduplicated with semantic matches, and never saved to the embedding queue.
-Filenames and paths, exact text, and
-semantic cosine similarity contribute to ranking. Weak semantic neighbors are
-filtered relative to the best match. Results are deduplicated by file. The service
+All sources enter one ranking before the result limit is applied. Filename and
+title equality have explicit priority; complete phrases, words, prefixes,
+substrings, and folder-path matches contribute progressively less evidence.
+BM25 ranks exact-text matches by file, rather than counting repeated chunks as
+separate files. Cosine similarity is rescaled from its 0.30 retrieval floor to
+the same 0–1 range as non-exact lexical evidence. The stronger signal dominates,
+with a bounded boost when lexical and semantic evidence agree; an incidental
+filename or keyword match cannot unconditionally outrank semantic retrieval.
+These are relevance scores, not probabilities. Weak semantic neighbors are
+filtered relative to the best match (at least 0.60 and within 0.12 of the best
+cosine), including when corroborating a lexical result. Lexical results remain
+available below that semantic cutoff. The best semantic chunk supplies the
+snippet, page, and timestamp even for a file with a matching name. Only embeddings
+from the active pipeline contribute. Results are deduplicated by file, with URI
+as a deterministic tie-breaker. The service
 bounds its queue and drops stale requests separately for Shell and diagnostic clients; it
 returns a complete result set rather than continuously inserting reordered rows.
 Semantic candidates keep one best chunk per file in a bounded score-ordered set,
 so updates and evictions take logarithmic time even for 5,000 requested results.
-Filename merging uses a URI map. Selected paths are revalidated before returning.
+Lexical candidates and their best semantic chunks use URI maps. Filename-only
+locations retain GNOME's broader scope; selected paths are revalidated against
+privacy and exclusion rules before returning. No additional model, inference
+request, dependency, database migration, or reindex is needed for ranking changes.
 Vector scans stream from SQLite with a bounded page cache instead of loading the
 entire collection. This favors a minimal dependency tree; ANN is a future option
 if measured library sizes require it.
