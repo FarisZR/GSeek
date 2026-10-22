@@ -328,7 +328,8 @@ pub fn filename_matches(query: &str, settings: &Settings, limit: usize) -> Resul
         sparql_string(query.trim()),
         sparql_string(r"\.[^.]+$")
     );
-    let mut records = filename_records(None, &exact, settings, limit)?;
+    // Keep both lookups on GNOME's FTS index instead of scanning every filename.
+    let mut records = filename_records(Some(&pattern), &exact, settings, limit)?;
     records.extend(filename_records(Some(&pattern), &filter, settings, limit)?);
     let mut seen = std::collections::HashSet::new();
     let mut ranked: Vec<_> = records
