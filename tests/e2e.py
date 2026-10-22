@@ -142,6 +142,36 @@ class EndToEnd(unittest.TestCase):
         refined = self.invoke("GetSubsearchResultSet", GLib.Variant("(asas)", (ids, ["pets", "in", "lease"])), SHELL_IFACE, PROVIDER)[0]
         self.assertTrue(refined)
 
+    def test_01c_exact_filename_beyond_candidate_budget_matches_show_all(self):
+        downloads = ROOT / "AAA-Ranking"
+        downloads.mkdir()
+        paths = [downloads / f"A-rankcheckpart-{i:04}.zip" for i in range(5005)]
+        exact = downloads / "Z" / "rankcheck.zip"
+        exact.parent.mkdir()
+        paths.append(exact)
+        try:
+            for path in paths:
+                path.write_text("Not embedded.")
+            triples = " ".join(
+                f'<{p.as_uri()}> a nfo:FileDataObject ; nie:url {json.dumps(p.as_uri())} ; nfo:fileName {json.dumps(p.name)} .'
+                for p in paths)
+            self.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ {triples} }} }}', None)
+            query = "rankcheck"
+            for limit in [1, 20, 5000]:
+                hits = json.loads(self.invoke("Search", GLib.Variant("(su)", (query, limit)))[0])
+                self.assertEqual(hits[0]["uri"], exact.as_uri(), hits[:3])
+            ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", ([query],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertEqual(ids[0], exact.as_uri())
+        finally:
+            self.conn.update(
+                'DELETE { GRAPH tracker:FileSystem { ?f ?p ?o } } WHERE { '
+                'GRAPH tracker:FileSystem { ?f ?p ?o . '
+                f'FILTER(STRSTARTS(STR(?f), {json.dumps(downloads.as_uri() + "/")})) }} }}', None)
+            for path in paths:
+                path.unlink(missing_ok=True)
+            exact.parent.rmdir()
+            downloads.rmdir()
+
     def test_01b_hybrid_ranking_beats_incidental_gnome_names_in_activities(self):
         # This URI sorts before Documents, reproducing the old score-3 filename
         # tie that displaced an actually relevant document by filesystem order.

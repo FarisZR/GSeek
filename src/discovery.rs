@@ -320,7 +320,33 @@ pub fn filename_matches(query: &str, settings: &Settings, limit: usize) -> Resul
         return Ok(vec![]);
     }
 
-    filename_records(Some(&pattern), &filter, settings, limit)
+    // Retrieve exact names/titles independently of the broad URI-paged pool.
+    // An exact file in Downloads must not disappear behind thousands of weak
+    // prefix matches just because its URI sorts later.
+    let exact = format!(
+        "LCASE(nfo:fileName(?f)) = LCASE({0}) || LCASE(REPLACE(nfo:fileName(?f), {1}, \"\")) = LCASE({0})",
+        sparql_string(query.trim()),
+        sparql_string(r"\.[^.]+$")
+    );
+    let mut records = filename_records(None, &exact, settings, limit)?;
+    records.extend(filename_records(Some(&pattern), &filter, settings, limit)?);
+    let mut seen = std::collections::HashSet::new();
+    let mut ranked: Vec<_> = records
+        .into_iter()
+        .filter(|file| seen.insert(file.uri.clone()))
+        .map(|file| {
+            (
+                crate::ranking::filename(query, &file.name, &file.path),
+                file,
+            )
+        })
+        .collect();
+    ranked.sort_by(|(a, left), (b, right)| b.total_cmp(a).then(left.uri.cmp(&right.uri)));
+    Ok(ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, file)| file)
+        .collect())
 }
 
 pub fn indexed_search_record(uri: &str, settings: &Settings) -> Result<Option<FileRecord>> {

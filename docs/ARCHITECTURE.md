@@ -60,6 +60,11 @@ Lexical candidates and their best semantic chunks use URI maps. Filename-only
 locations retain GNOME's broader scope; selected paths are revalidated against
 privacy and exclusion rules before returning. No additional model, inference
 request, dependency, database migration, or reindex is needed for ranking changes.
+Lexical sources share a fixed 5,000-candidate budget independent of the requested
+result count, so requesting fewer results does not change their relevance order.
+LocalSearch exact-name/title lookups run separately from the broad URI-paged
+lookup, then deduplicate and rank the combined filename pool before capping it.
+This preserves exact GNOME-only matches beyond the broad candidate budget.
 Vector scans stream from SQLite with a bounded page cache instead of loading the
 entire collection. This favors a minimal dependency tree; ANN is a future option
 if measured library sizes require it.

@@ -641,10 +641,7 @@ impl Store {
             }
             sql.push_str(&format!("instr(folded,?{})>0", i + 1));
         }
-        sql.push_str(&format!(
-            " ORDER BY length(name),uri LIMIT {}",
-            limit.max(500)
-        ));
+        sql.push_str(&format!(" ORDER BY length(name),uri LIMIT {MAX_RESULTS}"));
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params_from_iter(&terms))?;
         while let Some(r) = rows.next()? {
@@ -660,8 +657,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds FROM words
             JOIN chunks c ON c.id=words.rowid JOIN files f ON f.content=c.content
-            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {}",
-            limit.max(500)
+            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {MAX_RESULTS}"
         ))?;
         let mut word_matches = std::collections::HashSet::new();
         for row in stmt.query_map([fts], |r| {
@@ -698,7 +694,7 @@ impl Store {
                     .zip(v)
                     .map(|(b, q)| f32::from_le_bytes(*b) as f64 * *q as f64)
                     .sum();
-                if score < 0.30 || !score.is_finite() {
+                if score < crate::ranking::SEMANTIC_FLOOR || !score.is_finite() {
                     continue;
                 }
                 let path: String = r.get(1)?;

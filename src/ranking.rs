@@ -2,6 +2,8 @@
 use crate::store::folded;
 use std::path::Path;
 
+pub(crate) const SEMANTIC_FLOOR: f64 = 0.30;
+
 fn words(text: &str) -> Vec<&str> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -52,10 +54,16 @@ pub(crate) fn filename(query: &str, name: &str, path: &Path) -> f64 {
     }
 }
 
+// Keep explicit name/title intent above semantic scores, while allowing strong
+// meaning matches to beat incidental lexical evidence. Rank-only fusion would
+// discard that distinction. The 0.30 baseline and Store's 0.60/0.12 filtering
+// policy belong to EmbeddingGemma; revalidate them when changing models.
 pub(crate) fn combined(lexical: f64, cosine: Option<f64>) -> f64 {
     // The retrieval floor is 0.30. Do not treat a positive cosine as certainty:
     // unrelated EmbeddingGemma documents can share a substantial cosine baseline.
-    let semantic = cosine.map_or(0.0, |score| ((score - 0.30) / 0.70).clamp(0.0, 1.0));
+    let semantic = cosine.map_or(0.0, |score| {
+        ((score - SEMANTIC_FLOOR) / (1.0 - SEMANTIC_FLOOR)).clamp(0.0, 1.0)
+    });
     if lexical >= 1.0 {
         // An exact name/title expresses explicit intent; semantics breaks ties.
         return lexical + 0.05 * semantic;

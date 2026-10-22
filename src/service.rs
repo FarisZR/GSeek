@@ -570,7 +570,7 @@ impl SearchQueue {
                     let files = match discovery::filename_matches(
                         &job.query,
                         &settings,
-                        job.limit.max(500),
+                        crate::store::MAX_RESULTS,
                     ) {
                         Ok(files) => {
                             shared.lock().unwrap().filename_error.clear();
