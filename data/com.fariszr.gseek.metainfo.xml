@@ -16,5 +16,14 @@
   <url type="vcs-browser">https://github.com/FarisZR/GSeek</url>
   <content_rating type="oars-1.1"/>
   <screenshots><screenshot type="default"><caption>GSeek setup</caption><image>https://raw.githubusercontent.com/FarisZR/GSeek/main/docs/screenshots/welcome.png</image></screenshot></screenshots>
-  <releases><release version="0.2.1" date="2026-10-20"><description><p>Install from a signed Flatpak repository using the downloadable install file.</p></description></release><release version="0.2.0" date="2026-10-19"><description><p>Native Flatpak distribution, background portal integration, and automatic restart after installed updates.</p></description></release></releases>
+  <releases>
+    <release version="0.2.2" date="2026-10-22">
+      <description>
+        <p>Search results now combine filenames, document text, and semantic relevance. Exact filenames and titles take priority, strong meaning matches can beat incidental keywords, and matching name and content evidence receives a boost.</p>
+        <p>Activities and Show All Results use consistent ordering. Exact filenames remain discoverable beyond the broader candidate limit, and results retain their best matching passage. Existing indexes work without reindexing.</p>
+      </description>
+    </release>
+    <release version="0.2.1" date="2026-10-20"><description><p>Install from a signed Flatpak repository using the downloadable install file.</p></description></release>
+    <release version="0.2.0" date="2026-10-19"><description><p>Native Flatpak distribution, background portal integration, and automatic restart after installed updates.</p></description></release>
+  </releases>
 </component>

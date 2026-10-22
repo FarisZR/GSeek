@@ -1,6 +1,6 @@
 [package]
 name = "gseek"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.99"
 description = "Find your files by what you remember, from GNOME Search"
