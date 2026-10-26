@@ -62,6 +62,11 @@ class EndToEnd(unittest.TestCase):
         cls.endpoint = Sparql.EndpointDBus.new(cls.conn, cls.bus, None, None)
         cls.owner = Gio.bus_own_name_on_connection(
             cls.bus, "org.freedesktop.LocalSearch3", Gio.BusNameOwnerFlags.NONE, None, None)
+        if os.environ.get("GSEEK_TEST_NAUTILUS") == "1":
+            # Some distributions retain this bus name in Nautilus. Point both
+            # clients at the same fixture; never activate a real file crawler.
+            cls.legacy_owner = Gio.bus_own_name_on_connection(
+                cls.bus, "org.freedesktop.Tracker3.Miner.Files", Gio.BusNameOwnerFlags.NONE, None, None)
         cls.loop = GLib.MainLoop()
         cls.thread = threading.Thread(target=cls.loop.run, daemon=True)
         cls.thread.start()
@@ -141,6 +146,72 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("icon", metas[0])
         refined = self.invoke("GetSubsearchResultSet", GLib.Variant("(asas)", (ids, ["pets", "in", "lease"])), SHELL_IFACE, PROVIDER)[0]
         self.assertTrue(refined)
+
+    def test_01d_gnome_timestamps_and_content_choose_the_intended_copy(self):
+        documents = self.docs / "Research"
+        downloads = ROOT / "Downloads"
+        documents.mkdir()
+        downloads.mkdir(exist_ok=True)
+        wanted = documents / "Research Profile.txt"
+        old = downloads / wanted.name
+        wanted.write_text("Research profile. Observatory permit 7286. The intended reference document.")
+        old.write_text("Unrelated material from an older export.")
+        baseline = time.time() - 180 * 86400
+        os.utime(wanted, (baseline, baseline))
+        def indexed(path, timestamp):
+            date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+            self.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ <{path.as_uri()}> a nfo:FileDataObject ; nie:url {json.dumps(path.as_uri())} ; nfo:fileName {json.dumps(path.name)} ; nfo:fileCreated "{date}"^^xsd:dateTime ; nfo:fileLastModified "{date}"^^xsd:dateTime ; nfo:fileLastAccessed "{date}"^^xsd:dateTime . }} }}', None)
+        indexed(wanted, baseline)
+        indexed(old, time.time())
+        try:
+            with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
+                wait_for(lambda: db.execute("SELECT state FROM files WHERE uri=?", (wanted.as_uri(),)).fetchone() == ("indexed",))
+            started = time.monotonic()
+            hits = self.search("Research Profile")
+            latency = time.monotonic() - started
+            self.assertEqual(hits[0]["uri"], wanted.as_uri(), hits)
+            print(json.dumps({"benchmark": "same-name copies, matching text vs recent download", "Success@1": 1, "Success@3": 1, "latency_ms": round(latency * 1000)}), flush=True)
+            self.assertLess(latency, 2.0)
+            if os.environ.get("GSEEK_TEST_NAUTILUS") == "1":
+                def stock_results():
+                    return self.bus.call_sync("org.gnome.Nautilus", "/org/gnome/Nautilus/SearchProvider",
+                        SHELL_IFACE, "GetInitialResultSet", GLib.Variant("(as)", (["Research", "Profile"],)),
+                        None, Gio.DBusCallFlags.NONE, 30000, None).unpack()[0]
+                # Nautilus initializes its index connection asynchronously on
+                # activation. Compare warm providers, not that startup race.
+                baseline_ids = wait_for(stock_results, timeout=10)
+                self.assertIn(wanted.as_uri(), baseline_ids, baseline_ids)
+                print(json.dumps({"benchmark": "stock Nautilus SearchProvider2", "version": subprocess.check_output(["nautilus", "--version"], text=True).strip(), "Success@1": int(baseline_ids[0] == wanted.as_uri()), "Success@3": int(wanted.as_uri() in baseline_ids[:3])}), flush=True)
+        finally:
+            for path in [wanted, old]:
+                self.remove(path)
+                path.unlink()
+            documents.rmdir()
+
+    def test_01e_overview_suppresses_only_hash_proven_identical_copies(self):
+        folder = self.docs / "Identical"
+        folder.mkdir()
+        files = [folder / name for name in ["Reference A.txt", "Reference B.txt", "Reference C.txt"]]
+        files[0].write_text("Identical reference material for the astronomy committee.")
+        files[1].write_bytes(files[0].read_bytes())
+        files[2].write_text("Distinct reference material about gardening.")
+        for path in files:
+            self.add(path)
+        try:
+            with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
+                wait_for(lambda: db.execute("SELECT count(*) FROM files WHERE uri IN (?,?,?) AND state='indexed'", tuple(p.as_uri() for p in files)).fetchone()[0] == 3)
+            hits = self.search("Reference")
+            copies = {p.as_uri() for p in files[:2]}
+            self.assertEqual(len([h for h in hits if h["uri"] in copies]), 2)
+            ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", (["Reference"],)), SHELL_IFACE, PROVIDER)[0]
+            self.assertEqual(len(copies.intersection(ids)), 1, ids)
+            self.assertIn(files[2].as_uri(), ids)
+            print(json.dumps({"benchmark": "identical copies", "redundant_in_overview_top3": 0}), flush=True)
+        finally:
+            for path in files:
+                self.remove(path)
+                path.unlink()
+            folder.rmdir()
 
     def test_01c_exact_filename_beyond_candidate_budget_matches_show_all(self):
         downloads = ROOT / "AAA-Ranking"
@@ -696,14 +767,55 @@ class EndToEnd(unittest.TestCase):
         else:
             self.skipTest("Run under Xvfb or GNOME with GSEEK_GUI_TEST_COMMAND to capture native views")
 
-    def test_09_incompatible_inference_shows_error_without_keyword_fallback(self):
+    def test_09_incompatible_inference_keeps_filename_search_and_explains_the_error(self):
         settings = json.loads(self.invoke("Settings")[0])
         settings["external"] = {"url": "http://127.0.0.1:9/v1", "model": "embeddinggemma-2", "allow_remote": False}
         self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
         wait_for(lambda: self.status()["state"] == "error")
-        with self.assertRaises(GLib.Error):
-            self.search("Rental Agreement")
+        started = time.monotonic()
+        self.assertEqual(self.search("Rental Agreement")[0]["name"], "Rental Agreement.txt")
+        self.assertLess(time.monotonic() - started, 1.0)
+        ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", (["Rental", "Agreement"],)), SHELL_IFACE, PROVIDER)[0]
+        self.assertEqual(ids[0], (self.docs / "Rental Agreement.txt").as_uri())
+        self.assertTrue(self.status()["semantic_error"])
         self.assertIn("connect", self.status()["detail"].lower())
+
+    def test_09b_stalled_ai_does_not_delay_later_filename_queries(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        entered = threading.Event()
+        release = threading.Event()
+        class Stalled(BaseHTTPRequestHandler):
+            def do_POST(self):
+                entered.set()
+                release.wait(10)
+                self.send_response(503)
+                self.end_headers()
+            def log_message(self, *_args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Stalled)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        settings = json.loads(self.invoke("Settings")[0])
+        original = json.loads(json.dumps(settings))
+        settings["external"] = {"url": f"http://127.0.0.1:{server.server_port}/v1", "model": "embeddinggemma-2", "allow_remote": False}
+        self.invoke("Configure", GLib.Variant("(s)", (json.dumps(settings),)))
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                pending = pool.submit(self.search, "unmatched-concept-93827465")
+                self.assertTrue(entered.wait(3))
+                started = time.monotonic()
+                hits = self.search("Rental Agreement")
+                elapsed = time.monotonic() - started
+                self.assertEqual(hits[0]["name"], "Rental Agreement.txt")
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual(pending.result(timeout=1), [])
+                print(json.dumps({"benchmark": "stalled inference while typing", "filename_latency_ms": round(elapsed * 1000)}), flush=True)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+            self.invoke("Configure", GLib.Variant("(s)", (json.dumps(original),)))
 
 
 if __name__ == "__main__":

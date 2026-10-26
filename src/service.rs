@@ -31,6 +31,7 @@ pub struct Status {
     pub version: String,
     pub discovery_error: String,
     pub filename_error: String,
+    pub semantic_error: String,
     pub discovering: bool,
     pub state: String,
     pub detail: String,
@@ -147,7 +148,6 @@ pub fn run(paths: Paths) -> Result<()> {
         let info = gio::DBusNodeInfo::for_xml(SEARCH_XML).unwrap().interfaces()[0].clone();
         let spaths = startup_paths.clone();
         let queue = search.clone();
-        let state = startup_shared.clone();
         connection
             .register_object(OBJECT_PATH, &info)
             .method_call(
@@ -166,9 +166,6 @@ pub fn run(paths: Paths) -> Result<()> {
                                     .get::<Vec<String>>()
                                     .context("Invalid search terms")?;
                                 let query = terms.join(" ");
-                                if !state.lock().unwrap().ready {
-                                    bail!("{}", state.lock().unwrap().detail);
-                                }
                                 let response = queue.submit(query, 20, true)?;
                                 glib::spawn_future_local(async move {
                                     match response.recv().await {
@@ -353,9 +350,6 @@ pub fn run(paths: Paths) -> Result<()> {
                             "Search" => {
                                 let (query, limit) =
                                     parameters.get::<(String, u32)>().context("Invalid query")?;
-                                if !state.lock().unwrap().ready {
-                                    bail!("{}", state.lock().unwrap().detail);
-                                }
                                 let response = queue.submit(query, limit as usize, false)?;
                                 let invocation = invocation.clone();
                                 glib::spawn_future_local(async move {
@@ -514,6 +508,14 @@ struct SearchJob {
     shell: bool,
     reply: async_channel::Sender<Result<Vec<SearchHit>, String>>,
 }
+struct SemanticJob {
+    query: String,
+    settings: Settings,
+    cancellation: crate::cancellation::Cancellation,
+    counter: Arc<AtomicU64>,
+    generation: u64,
+    reply: mpsc::Sender<Result<(Vec<f32>, String), String>>,
+}
 struct SearchQueue {
     sender: mpsc::SyncSender<SearchJob>,
     shell: Arc<AtomicU64>,
@@ -523,77 +525,102 @@ impl SearchQueue {
     fn new(paths: &Paths, work: WorkControl, shared: Shared) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<SearchJob>(32);
         let paths = paths.clone();
+        let paths_for_search = paths.clone();
         let shell = Arc::new(AtomicU64::new(0));
         let ui = Arc::new(AtomicU64::new(0));
         let wshell = shell.clone();
         let wui = ui.clone();
+        // Model work has its own bounded queue: a cold or failed helper must not
+        // hold up ordinary GNOME filename searches or later typing events.
+        let (semantic_tx, semantic_rx) = mpsc::sync_channel::<SemanticJob>(1);
         std::thread::spawn(move || {
             let mut runtime: Option<Runtime> = None;
             let mut previous = String::new();
             loop {
-                let job = match receiver.recv_timeout(Duration::from_secs(30)) {
+                let job = match semantic_rx.recv_timeout(Duration::from_secs(30)) {
                     Ok(job) => job,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         if let Some(runtime) = runtime.as_mut() {
                             runtime.release_idle();
                         }
                         continue;
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
+                if job.counter.load(Ordering::Relaxed) != job.generation {
+                    continue;
+                }
+                let result = (|| -> Result<_> {
+                    let serialized = serde_json::to_string(&job.settings)?;
+                    if serialized != previous || runtime.as_ref().is_some_and(Runtime::cancelled) {
+                        runtime = Some(
+                            Runtime::new(&paths, &job.settings, true)
+                                .with_cancellation(job.cancellation),
+                        );
+                        previous = serialized;
+                    }
+                    let runtime = runtime.as_mut().unwrap();
+                    Ok((runtime.query(&job.query)?, runtime.fingerprint()))
+                })()
+                .map_err(|e| format!("{e:#}"));
+                let _ = job.reply.send(result);
+                if let Some(runtime) = runtime.as_mut() {
+                    runtime.release_idle();
+                }
+            }
+        });
+        let paths = paths_for_search;
+        std::thread::spawn(move || {
+            while let Ok(job) = receiver.recv() {
                 let generation = if job.shell { &wshell } else { &wui };
                 if generation.load(Ordering::Relaxed) != job.generation {
                     let _ = job.reply.send_blocking(Ok(vec![]));
                     continue;
                 }
                 let result = (|| -> Result<Vec<SearchHit>> {
-                    let cancellation = work.token();
                     let settings = paths.load()?;
-                    if !settings.configured {
-                        bail!("Complete GSeek setup before searching");
-                    }
-                    let serialized = serde_json::to_string(&settings)?;
-                    if serialized != previous || runtime.as_ref().is_some_and(Runtime::cancelled) {
-                        runtime = Some(
-                            Runtime::new(&paths, &settings, true).with_cancellation(cancellation),
-                        );
-                        previous = serialized;
-                    }
-                    let runtime = runtime.as_mut().unwrap();
-                    // Inference is required. There is intentionally no keyword-only fallback.
-                    let vector = runtime.query(&job.query)?;
-                    if generation.load(Ordering::Relaxed) != job.generation {
-                        return Ok(vec![]);
-                    }
-                    // LocalSearch remains the authority for ordinary filename results,
-                    // including Downloads and formats without a content reader.
-                    let files = match discovery::filename_matches(
-                        &job.query,
-                        &settings,
-                        crate::store::MAX_RESULTS,
-                    ) {
-                        Ok(files) => {
-                            shared.lock().unwrap().filename_error.clear();
-                            files
-                        }
+                    let query_settings = serde_json::to_string(&settings)?;
+                    if !settings.configured { bail!("Complete GSeek setup before searching"); }
+                    let files = match discovery::filename_matches(&job.query, &settings, crate::store::MAX_RESULTS) {
+                        Ok(files) => { shared.lock().unwrap().filename_error.clear(); files }
                         Err(e) => {
-                            shared.lock().unwrap().filename_error =
-                                format!("GNOME filename search unavailable: {e:#}");
+                            shared.lock().unwrap().filename_error = format!("GNOME filename search unavailable: {e:#}");
                             vec![]
                         }
                     };
-                    Store::open(&paths.database())?.search(
-                        crate::store::SearchQuery {
-                            text: &job.query,
-                            vector: &vector,
-                            pipeline: &runtime.fingerprint(),
-                        },
-                        &settings,
-                        &files,
-                        job.limit,
-                    )
-                })()
-                .map_err(|e| format!("{e:#}"));
+                    let store = Store::open(&paths.database())?;
+                    let mut hits = store.search(crate::store::SearchQuery { text: &job.query, embedding: None }, &settings, &files, job.limit)?;
+                    let (reply, response) = mpsc::channel();
+                    let semantic = SemanticJob { query: job.query.clone(), settings: settings.clone(),
+                        cancellation: work.token(), counter: generation.clone(), generation: job.generation, reply };
+                    let result = if semantic_tx.try_send(semantic).is_ok() {
+                        // A known-file query has a strict warm-model budget. If
+                        // there are no lexical matches, give content search time
+                        // to load once; the next request uses the warm helper.
+                        let deadline = Instant::now() + if hits.is_empty() { Duration::from_secs(5) } else { Duration::from_millis(150) };
+                        loop {
+                            if generation.load(Ordering::Relaxed) != job.generation { return Ok(vec![]); }
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() { break Err(mpsc::RecvTimeoutError::Timeout); }
+                            match response.recv_timeout(remaining.min(Duration::from_millis(10))) {
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                result => break result,
+                            }
+                        }
+                    } else { Err(mpsc::RecvTimeoutError::Timeout) };
+                    match result {
+                        Ok(Ok((vector, pipeline))) => {
+                            shared.lock().unwrap().semantic_error.clear();
+                            hits = store.search(crate::store::SearchQuery { text: &job.query, embedding: Some(crate::store::SearchEmbedding { vector: &vector, pipeline: &pipeline }) }, &settings, &files, job.limit)?;
+                        }
+                        Ok(Err(error)) => { shared.lock().unwrap().semantic_error = format!("Semantic search unavailable: {error}"); }
+                        Err(_) => { shared.lock().unwrap().semantic_error = "Semantic search is starting or busy; showing filename and text matches".into(); }
+                    }
+                    if generation.load(Ordering::Relaxed) != job.generation
+                        || serde_json::to_string(&paths.load()?)? != query_settings { return Ok(vec![]); }
+                    if job.shell { hits.retain(|hit| !hit.duplicate); }
+                    Ok(hits)
+                })().map_err(|e| format!("{e:#}"));
                 let _ = job.reply.send_blocking(result);
             }
         });

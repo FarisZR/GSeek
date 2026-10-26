@@ -4,6 +4,72 @@ use std::path::Path;
 
 pub(crate) const SEMANTIC_FLOOR: f64 = 0.30;
 
+/// Metadata already supplied by GNOME; no activation-history database.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SearchMetadata {
+    pub fts_rank: f64,
+    pub modified: i64,
+    pub accessed: i64,
+}
+
+fn comparable(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    glib::casefold(text)
+        .nfkd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect()
+}
+
+/// NautilusQuery's global filename match: prefer earlier, tighter matches.
+pub(crate) fn name_match(query: &str, name: &str) -> f64 {
+    let name = comparable(name);
+    let query = comparable(query);
+    let mut tail = 0;
+    let mut position = 0;
+    let mut found = false;
+    for word in query.split_whitespace() {
+        let Some(offset) = name.find(word) else {
+            return 0.0;
+        };
+        position = offset;
+        tail += name.len() - offset - word.len();
+        found = true;
+    }
+    if found {
+        (50.0 - position as f64 - tail as f64 / 100.0).max(10.0)
+    } else {
+        0.0
+    }
+}
+
+/// Same global recency bands as NautilusSearchHit (query_location = NULL).
+pub(crate) fn recency(metadata: &SearchMetadata, now: i64) -> f64 {
+    let recent = metadata.modified.max(metadata.accessed);
+    if recent <= 0 {
+        return 0.0;
+    }
+    let days = now.saturating_sub(recent).max(0) / 86400;
+    match days {
+        0..=1 => 100.0,
+        2..=7 => 70.0,
+        8..=14 => 50.0,
+        15..=30 => 30.0,
+        31..=90 => 10.0,
+        _ => 0.0,
+    }
+}
+
+pub(crate) fn context(query: &str, name: &str, metadata: &SearchMetadata, now: i64) -> f64 {
+    // Keep these secondary to filename class / semantic confidence. Within a
+    // class, retain GNOME's actual FTS magnitude, match position and recency.
+    let fts = if metadata.fts_rank.is_finite() {
+        metadata.fts_rank.clamp(0.0, 50.0)
+    } else {
+        0.0
+    };
+    0.001 * (name_match(query, name) + fts + recency(metadata, now))
+}
+
 fn words(text: &str) -> Vec<&str> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -11,10 +77,10 @@ fn words(text: &str) -> Vec<&str> {
 }
 
 pub(crate) fn filename(query: &str, name: &str, path: &Path) -> f64 {
-    let query = folded(query.trim());
-    let name = folded(name);
+    let query = comparable(query.trim());
+    let name = comparable(name);
     if query == name {
-        return 1.2;
+        return 3.0;
     }
     let query_words = words(&query);
     if query_words.is_empty() {
@@ -25,7 +91,7 @@ pub(crate) fn filename(query: &str, name: &str, path: &Path) -> f64 {
         .and_then(|s| s.to_str())
         .unwrap_or(&name);
     if words(stem) == query_words {
-        return 1.1;
+        return 2.0;
     }
     let name_words = words(&name);
     if name_words

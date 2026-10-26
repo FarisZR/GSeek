@@ -581,7 +581,13 @@ impl Window {
             move || -> Result<_> {
                 let hits = service::search(&requested, crate::store::MAX_RESULTS as u32)?;
                 let warning = service::read_status()
-                    .map(|s| s.filename_error)
+                    .map(|s| {
+                        [s.filename_error, s.semantic_error]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    })
                     .unwrap_or_default();
                 Ok((hits, warning))
             },

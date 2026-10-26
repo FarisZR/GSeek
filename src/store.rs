@@ -1,4 +1,5 @@
 use crate::config::Settings;
+pub use crate::ranking::SearchMetadata;
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub fn now() -> i64 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileRecord {
     #[serde(default)]
+    pub search: crate::ranking::SearchMetadata,
+    #[serde(default)]
     pub source_id: i64,
     pub uri: String,
     pub path: PathBuf,
@@ -36,6 +39,8 @@ pub struct FileRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchHit {
+    #[serde(skip)]
+    pub(crate) duplicate: bool,
     pub uri: String,
     pub path: PathBuf,
     pub name: String,
@@ -49,6 +54,10 @@ pub struct SearchHit {
 /// A query embedding and the pipeline that produced it must travel together.
 pub struct SearchQuery<'a> {
     pub text: &'a str,
+    pub embedding: Option<SearchEmbedding<'a>>,
+}
+
+pub struct SearchEmbedding<'a> {
     pub vector: &'a [f32],
     pub pipeline: &'a str,
 }
@@ -157,7 +166,7 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-8192; PRAGMA synchronous=NORMAL;")?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             bail!("This index was created by a newer GSeek; please upgrade the application");
         }
         if version == 0 {
@@ -191,6 +200,14 @@ impl Store {
         }
         if version == 2 {
             conn.execute_batch("BEGIN IMMEDIATE; ALTER TABLE files ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0; CREATE INDEX file_source ON files(source_id); PRAGMA user_version=3; COMMIT;")?;
+        }
+        if version < 4 {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                ALTER TABLE files ADD COLUMN modified INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE files ADD COLUMN accessed INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version=4; COMMIT;",
+            )?;
         }
         Ok(Self { conn })
     }
@@ -251,6 +268,10 @@ impl Store {
             state=CASE WHEN files.stamp!=excluded.stamp THEN excluded.state ELSE files.state END,stamp=excluded.stamp",
             params![file.uri, file.path.to_string_lossy(), file.name, file.mime, folded(&file.path.to_string_lossy()),
                 file.stamp, i64::try_from(file.size).unwrap_or(i64::MAX), file.folder, generation, if file.folder { "indexed" } else { "pending" },file.source_id])?;
+        self.conn.execute(
+            "UPDATE files SET modified=?2,accessed=?3 WHERE uri=?1",
+            params![file.uri, file.search.modified, file.search.accessed],
+        )?;
         if let Some(tx) = tx {
             tx.commit()?;
         }
@@ -348,6 +369,7 @@ impl Store {
 
     fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
         Ok(FileRecord {
+            search: Default::default(),
             source_id: 0,
             uri: row.get(0)?,
             path: PathBuf::from(row.get::<_, String>(1)?),
@@ -613,7 +635,9 @@ impl Store {
         if terms.is_empty() {
             return Ok(vec![]);
         }
-        validate_vector(query.vector)?;
+        if let Some(embedding) = &query.embedding {
+            validate_vector(embedding.vector)?;
+        }
         let limit = limit.clamp(1, MAX_RESULTS);
         let mut hits = HashMap::<String, SearchHit>::new();
         // Collect every source before scoring or truncating. A filename from
@@ -622,6 +646,7 @@ impl Store {
             hits.insert(
                 file.uri.clone(),
                 SearchHit {
+                    duplicate: false,
                     uri: file.uri.clone(),
                     path: file.path.clone(),
                     name: file.name.clone(),
@@ -655,33 +680,41 @@ impl Store {
             .collect::<Vec<_>>()
             .join(" AND ");
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds FROM words
-            JOIN chunks c ON c.id=words.rowid JOIN files f ON f.content=c.content
-            WHERE words MATCH ?1 ORDER BY bm25(words),f.uri LIMIT {MAX_RESULTS}"
+            "WITH matches AS MATERIALIZED (
+                SELECT rowid,bm25(words) AS strength FROM words WHERE words MATCH ?1)
+            SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds,MIN(m.strength)
+            FROM matches m JOIN chunks c ON c.id=m.rowid JOIN files f ON f.content=c.content
+            WHERE f.state='indexed' GROUP BY f.uri ORDER BY MIN(m.strength),f.uri LIMIT {MAX_RESULTS}"
         ))?;
-        let mut word_matches = std::collections::HashSet::new();
+        let mut best_word_strength = 0.0_f64;
         for row in stmt.query_map([fts], |r| {
-            hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, 0.0)
+            Ok((
+                hit_row(r, &r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, 0.0)?,
+                r.get::<_, f64>(7)?,
+            ))
         })? {
-            let mut h = row?;
-            if !word_matches.insert(h.uri.clone()) {
-                continue;
-            }
-            // BM25 orders content candidates; count files rather than chunks so
-            // a long document cannot push down every file that follows it.
-            h.score = (0.35 + 0.20 / word_matches.len() as f64)
-                .max(crate::ranking::filename(query.text, &h.name, &h.path));
+            let (mut h, raw) = row?;
+            let strength = (-raw).max(0.0);
+            best_word_strength = best_word_strength.max(strength);
+            let relative = if best_word_strength > 0.0 {
+                strength / best_word_strength
+            } else {
+                0.0
+            };
+            let name = crate::ranking::filename(query.text, &h.name, &h.path);
+            h.score =
+                name.max(0.35 + 0.20 * relative) + if name > 0.0 { 0.12 * relative } else { 0.0 };
             keep_hit(&mut hits, h, settings);
         }
         let mut lexical_semantics = HashMap::<String, SearchHit>::new();
         let mut best_semantic = 0.0_f64;
-        let mut semantic = SemanticCandidates::new(limit);
-        {
-            let v = query.vector;
+        let mut semantic = SemanticCandidates::new(MAX_RESULTS);
+        if let Some(embedding) = &query.embedding {
+            let v = embedding.vector;
             // Stream vectors from SQLite's bounded page cache; never materialize the vector database in memory.
             let mut stmt = self.conn.prepare("SELECT f.uri,f.path,f.name,f.mime,c.text,c.page,c.seconds,c.vector FROM chunks c
                 JOIN files f ON f.content=c.content JOIN contents p ON p.id=c.content WHERE c.vector IS NOT NULL AND p.pipeline=?1")?;
-            let mut rows = stmt.query([query.pipeline])?;
+            let mut rows = stmt.query([embedding.pipeline])?;
             while let Some(r) = rows.next()? {
                 let bytes: Vec<u8> = r.get(7)?;
                 if bytes.len() != DIMENSIONS * 4 {
@@ -753,7 +786,62 @@ impl Store {
             settings.allows_filename(&h.path)
                 && std::fs::canonicalize(&h.path).is_ok_and(|p| settings.allows_filename(&p))
         });
+        let metadata: HashMap<_, _> = filenames
+            .iter()
+            .map(|file| (file.uri.as_str(), file))
+            .collect();
+        let mut details = self
+            .conn
+            .prepare("SELECT modified,accessed,content,stamp,state FROM files WHERE uri=?1")?;
+        let mut identities = HashMap::new();
+        let at = now();
+        for hit in &mut hits {
+            let stored = details
+                .query_row([&hit.uri], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .optional()?;
+            let mut evidence = crate::ranking::SearchMetadata::default();
+            if let Some((modified, accessed, content, stamp, state)) = stored {
+                evidence.modified = modified;
+                evidence.accessed = accessed;
+                if state == "indexed"
+                    && let Some(content) = content
+                {
+                    let current = metadata
+                        .get(hit.uri.as_str())
+                        .map(|f| f.stamp.clone())
+                        .or_else(|| {
+                            std::fs::metadata(&hit.path)
+                                .ok()
+                                .map(|m| crate::discovery::file_stamp(&m))
+                        });
+                    if current.as_deref() == Some(&stamp) {
+                        identities.insert(hit.uri.clone(), content);
+                    }
+                }
+            }
+            if let Some(file) = metadata.get(hit.uri.as_str()) {
+                evidence = file.search.clone();
+            }
+            hit.score += crate::ranking::context(query.text, &hit.name, &evidence, at);
+        }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.uri.cmp(&b.uri)));
+        let mut seen = std::collections::HashSet::new();
+        for hit in &mut hits {
+            if let Some(identity) = identities.get(&hit.uri) {
+                hit.duplicate = !seen.insert(identity);
+            }
+        }
+        // The full window keeps every copy, after distinct results. Overview
+        // filters the flagged copies without inventing a grouped result UI.
+        hits.sort_by_key(|hit| hit.duplicate);
         hits.truncate(limit);
         Ok(hits)
     }
@@ -767,6 +855,7 @@ fn hit_row(
     score: f64,
 ) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
+        duplicate: false,
         uri: r.get(0)?,
         path: PathBuf::from(r.get::<_, String>(1)?),
         name: r.get(2)?,
@@ -810,8 +899,7 @@ mod tests {
     fn query<'a>(text: &'a str, vector: &'a [f32], pipeline: &'a str) -> SearchQuery<'a> {
         SearchQuery {
             text,
-            vector,
-            pipeline,
+            embedding: (!vector.is_empty()).then_some(SearchEmbedding { vector, pipeline }),
         }
     }
     fn query_vector() -> Vec<f32> {
@@ -829,6 +917,7 @@ mod tests {
             ..Default::default()
         };
         let f = FileRecord {
+            search: Default::default(),
             source_id: 1,
             uri,
             path,
@@ -839,6 +928,168 @@ mod tests {
             folder: false,
         };
         Ok((d, Store::open(Path::new(":memory:"))?, s, f))
+    }
+
+    #[test]
+    fn known_file_benchmark_uses_gnome_recency_and_rank_without_folder_bias() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let at = now();
+        let cases = [
+            (
+                "profile",
+                "Downloads/Profile.pdf",
+                "Documents/Profile.pdf",
+                0,
+                180,
+                0.0,
+            ),
+            (
+                "budget",
+                "Downloads/Budget.pdf",
+                "Documents/Budget.pdf",
+                180,
+                0,
+                0.0,
+            ),
+            (
+                "minutes",
+                "Documents/Minutes.pdf",
+                "Downloads/Minutes.pdf",
+                180,
+                0,
+                0.0,
+            ),
+            (
+                "contract",
+                "Downloads/Contract.pdf",
+                "Documents/Contract.pdf",
+                180,
+                180,
+                10.0,
+            ),
+            (
+                "proposal",
+                "Downloads/Proposal.pdf",
+                "Documents/Proposal.pdf",
+                15,
+                180,
+                0.0,
+            ),
+        ];
+        let mut success1 = 0;
+        let mut success3 = 0;
+        let mut gnome_success1 = 0;
+        let started = std::time::Instant::now();
+        for (text, old, wanted, old_days, new_days, rank) in cases {
+            let mut old =
+                ranked_file(dir.path(), &mut store, &template, old, vec![chunk(0.90, 1)])?;
+            let mut wanted = ranked_file(
+                dir.path(),
+                &mut store,
+                &template,
+                wanted,
+                vec![chunk(0.82, 1)],
+            )?;
+            if text == "profile" {
+                let mut page = chunk(0.82, 1);
+                page.text = "profile evidence".into();
+                store.save_content("Documents/Profile.pdf", "p", &[page])?;
+            }
+            old.search.modified = at - old_days * 86400;
+            wanted.search.modified = at - new_days * 86400;
+            wanted.search.fts_rank = rank;
+            if text == "proposal" {
+                wanted.search.accessed = at;
+            }
+            let files = [old.clone(), wanted.clone()];
+            let hits = store.search(query(text, &query_vector(), "p"), &settings, &files, 20)?;
+            let position = hits.iter().position(|h| h.uri == wanted.uri).unwrap();
+            success1 += usize::from(position == 0);
+            success3 += usize::from(position < 3);
+            // NautilusSearchHit global scoring, with NULL query location.
+            let baseline = |file: &FileRecord| {
+                (10.0 * (crate::ranking::name_match(text, &file.name) + file.search.fts_rank))
+                    .min(500.0)
+                    + crate::ranking::recency(&file.search, at)
+            };
+            gnome_success1 += usize::from(baseline(&wanted) > baseline(&old));
+            assert_eq!(hits[0].uri, wanted.uri, "{text}: {hits:?}");
+        }
+        eprintln!(
+            "Known-file corpus: Success@1={success1}/5 Success@3={success3}/5 GNOME-global-reference@1={gnome_success1}/5 elapsed={:?}",
+            started.elapsed()
+        );
+        assert_eq!(success1, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn proven_identical_copies_are_demoted_but_changed_and_unhashed_files_survive() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let mut first = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Documents/Guide.pdf",
+            vec![chunk(0.9, 1)],
+        )?;
+        first.stamp = crate::discovery::file_stamp(&std::fs::metadata(&first.path)?);
+        store.discover(&first, 1)?;
+        store.complete(&first.uri, "Documents/Guide.pdf")?;
+        let mut copy = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Copies/Guide.pdf",
+            vec![],
+        )?;
+        copy.stamp = crate::discovery::file_stamp(&std::fs::metadata(&copy.path)?);
+        store.discover(&copy, 1)?;
+        store.complete(&copy.uri, "Documents/Guide.pdf")?;
+        first.search.modified = now();
+        copy.search.modified = now() - 180 * 86400;
+        let unknown = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Downloads/Guide.pdf",
+            vec![],
+        )?;
+        let mut files = vec![copy.clone(), first.clone(), unknown];
+        let hits = store.search(query("guide", &query_vector(), "p"), &settings, &files, 20)?;
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].uri, first.uri);
+        assert_eq!(hits.iter().filter(|h| h.duplicate).count(), 1);
+        assert_eq!(hits.last().unwrap().uri, copy.uri);
+        std::fs::write(&copy.path, "a distinct revision")?;
+        files[0].stamp = crate::discovery::file_stamp(&std::fs::metadata(&copy.path)?);
+        let hits = store.search(query("guide", &[], ""), &settings, &files, 20)?;
+        assert!(hits.iter().all(|h| !h.duplicate));
+        Ok(())
+    }
+
+    #[test]
+    fn bm25_preserves_equal_strength_across_files_and_does_not_count_chunks_as_files() -> Result<()>
+    {
+        let (dir, mut store, settings, template) = fixture()?;
+        let make = || StoredChunk {
+            text: "archaeology satellite".into(),
+            vector: None,
+            page: Some(1),
+            seconds: None,
+        };
+        ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "A.txt",
+            (0..510).map(|_| make()).collect(),
+        )?;
+        ranked_file(dir.path(), &mut store, &template, "B.txt", vec![make()])?;
+        let hits = store.search(query("archaeology", &[], ""), &settings, &[], 20)?;
+        assert_eq!(hits.len(), 2);
+        assert!((hits[0].score - hits[1].score).abs() < 1e-10);
+        Ok(())
     }
 
     fn chunk(cosine: f32, page: u32) -> StoredChunk {
@@ -1371,7 +1622,7 @@ mod tests {
     }
     #[test]
     fn migrations_preserve_existing_content_and_make_it_resumable() -> Result<()> {
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let (directory, _, _, file) = fixture()?;
             let path = directory.path().join("older.sqlite");
             {
@@ -1388,9 +1639,12 @@ mod tests {
                     }],
                 )?;
                 store.complete(&file.uri, "hash")?;
-                store.conn.execute_batch(
-                    "DROP INDEX file_source; ALTER TABLE files DROP COLUMN source_id;",
-                )?;
+                store.conn.execute_batch("ALTER TABLE files DROP COLUMN modified; ALTER TABLE files DROP COLUMN accessed;")?;
+                if version < 3 {
+                    store.conn.execute_batch(
+                        "DROP INDEX file_source; ALTER TABLE files DROP COLUMN source_id;",
+                    )?;
+                }
                 if version == 1 {
                     store.conn.execute_batch("DROP INDEX chunk_part; ALTER TABLE chunks DROP COLUMN part; ALTER TABLE contents DROP COLUMN complete;")?;
                 }
