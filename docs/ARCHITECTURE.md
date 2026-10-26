@@ -33,41 +33,54 @@ SQLite owns metadata, the indexing queue, content-addressed chunks, FTS5, normal
 indexing, and queries concurrently. Versioned transactional migrations preserve
 existing indexed content; newer unknown schemas are rejected.
 
-Search requires a validated embedding. GNOME LocalSearch supplies ordinary filename
-results across its existing scope, including files outside the embedding folders.
-These results are stat-checked against privacy and explicit exclusion rules,
-deduplicated with semantic matches, and never saved to the embedding queue.
-All sources enter one ranking before the result limit is applied. Filename and
-title equality have explicit priority; complete phrases, words, prefixes,
-substrings, and folder-path matches contribute progressively less evidence.
-BM25 ranks exact-text matches by file, rather than counting repeated chunks as
-separate files. Cosine similarity is rescaled from its 0.30 retrieval floor to
-the same 0–1 range as non-exact lexical evidence. The stronger signal dominates,
-with a bounded boost when lexical and semantic evidence agree; an incidental
-filename or keyword match cannot unconditionally outrank semantic retrieval.
-These are relevance scores, not probabilities. Weak semantic neighbors are
-filtered relative to the best match (at least 0.60 and within 0.12 of the best
-cosine), including when corroborating a lexical result. Lexical results remain
-available below that semantic cutoff. The best semantic chunk supplies the
-snippet, page, and timestamp even for a file with a matching name. Only embeddings
-from the active pipeline contribute. Results are deduplicated by file, with URI
-as a deterministic tie-breaker. The service
-bounds its queue and drops stale requests separately for Shell and diagnostic clients; it
-returns a complete result set rather than continuously inserting reordered rows.
-Semantic candidates keep one best chunk per file in a bounded score-ordered set,
-so updates and evictions take logarithmic time even for 5,000 requested results.
-Lexical candidates and their best semantic chunks use URI maps. Filename-only
-locations retain GNOME's broader scope; selected paths are revalidated against
-privacy and exclusion rules before returning. No additional model, inference
-request, dependency, database migration, or reindex is needed for ranking changes.
-Lexical sources share a fixed 5,000-candidate budget independent of the requested
-result count, so requesting fewer results does not change their relevance order.
-LocalSearch exact-name/title lookups run separately from the broad URI-paged
-lookup, then deduplicate and rank the combined filename pool before capping it.
-This preserves exact GNOME-only matches beyond the broad candidate budget.
-Vector scans stream from SQLite with a bounded page cache instead of loading the
-entire collection. This favors a minimal dependency tree; ANN is a future option
-if measured library sizes require it.
+Search combines GNOME LocalSearch filename candidates with SQLite FTS5 and optional
+validated query embeddings. LocalSearch's numeric FTS rank and access/modification
+timestamps survive retrieval. Filename matching retains NautilusQuery's preference
+for earlier, tighter matches; recency uses NautilusSearchHit's global bands with a
+NULL query location. There is no folder-proximity or Documents/Downloads bonus.
+References: GNOME's `nautilus-query.c`, `nautilus-search-hit.c`,
+`nautilus-search-engine-localsearch.c`, and `nautilus-shell-search-provider.c`.
+
+Exact filename and stem classes outrank ordinary matches. Within a class, filename
+position, LocalSearch rank, recency and matching document text distinguish copies.
+SQLite BM25 magnitudes are normalized to the strongest matching file for that
+query, rather than replaced by ordinal ranks. A materialized FTS score relation
+selects each file's best text chunk before applying the candidate cap, preventing
+a long document from occupying every candidate slot. Semantic evidence uses the
+existing EmbeddingGemma thresholds and only the active pipeline's vectors.
+These relevance scores are heuristic, not probabilities or inferred scan quality.
+
+A separate single-slot inference queue bounds model work. Known-file requests give
+a warm model at most 150 ms. Overview and the native window have independent
+lexical workers, so a cold window query cannot delay Overview queries. Requests
+with no lexical matches allow up to five seconds for initial semantic inference.
+Waiting checks request generation every
+10 ms so later typing is not stuck behind a cold semantic query. Filename and
+text lookup work during model startup/failure, with a separate `semantic_error`
+status shown in the native results window. Stale results are dropped separately
+for Shell and the app, and settings are rechecked before replying. There is no
+new model, dependency, tracking database, or continuously reordering result UI.
+
+Ranking runs over a common, bounded 5,000-file candidate pool before truncation.
+LocalSearch's exact-name/stem lookup protects matches beyond its broad FTS pool;
+its numeric-rank ordered pages apply eligibility checks before counting results.
+No content is read merely to rank a filename candidate. Existing metadata stats
+and hashes are reused. Schema 4 adds access/modification columns; migration keeps
+all existing text, vectors and model downloads, without a reindex.
+Only GNOME's indexed timestamps supply access recency: filesystem atime is not
+used, since indexing readers can change it. Metadata-only refreshes preserve an
+already known access timestamp, and a changed file stamp clears it unless GNOME
+provides a replacement. The schema upgrade rechecks its version under SQLite's
+write lock so overlapping opens cannot apply it twice.
+
+After ranking, an existing content identity suppresses a duplicate in Overview
+only if the file is fully indexed and its current metadata stamp still matches
+the hashed version. No query-time hashing or speculative version/OCR-quality
+inference is performed. Show All Results retains copies after distinct files.
+Unhashed or changed files remain separate. The same distinct-result ordering is
+used in both views. Privacy, canonical-path and explicit-exclusion checks remain
+in force, including for files outside the embedding folders.
+
 
 ## Inference contracts
 

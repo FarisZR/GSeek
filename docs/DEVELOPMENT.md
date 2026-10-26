@@ -49,6 +49,9 @@ and `cuda/`.
 
 ## Tests
 
+Ranking regression cases, metrics, and the optional real GNOME Files comparison
+are documented in [SEARCH_EVALUATION.md](SEARCH_EVALUATION.md).
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings

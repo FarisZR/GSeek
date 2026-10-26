@@ -116,8 +116,10 @@ fn query_for(settings: &Settings, filter: &str, paged: bool) -> String {
         "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
       PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
       PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
-      SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
-      GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
+      SELECT DISTINCT ?url (tracker:id(?f) AS ?source) (STR(0) AS ?rank_text) ?modified ?accessed WHERE {{
+      GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url
+        OPTIONAL {{ ?f nfo:fileLastModified ?modified }}
+        OPTIONAL {{ ?f nfo:fileLastAccessed ?accessed }} }}
       FILTER ({filter}) FILTER ({}) }} ORDER BY ?url {limit}",
         if scope.is_empty() { "false" } else { &scope }
     )
@@ -212,6 +214,31 @@ fn read_query(
             record_for_search(&uri, settings)?
         };
         if let Some(mut record) = record {
+            {
+                let value = |column| {
+                    let raw = unsafe { (api.string_at)(cursor, column, ptr::null_mut()) };
+                    if raw.is_null() {
+                        None
+                    } else {
+                        Some(
+                            unsafe { CStr::from_ptr(raw) }
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    }
+                };
+                record.search.fts_rank = value(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                for (column, timestamp) in [
+                    (3, &mut record.search.modified),
+                    (4, &mut record.search.accessed),
+                ] {
+                    if let Some(date) =
+                        value(column).and_then(|s| glib::DateTime::from_iso8601(&s, None).ok())
+                    {
+                        *timestamp = date.to_unix();
+                    }
+                }
+            }
             let id = unsafe { (api.string_at)(cursor, 1, ptr::null_mut()) };
             if id.is_null() {
                 bail!("LocalSearch returned no resource ID");
@@ -297,16 +324,10 @@ pub fn filename_matches(query: &str, settings: &Settings, limit: usize) -> Resul
     if terms.is_empty() {
         return Ok(vec![]);
     }
-    let filter = terms
-        .iter()
-        .map(|t| {
-            format!(
-                "CONTAINS(LCASE(nfo:fileName(?f)), LCASE({}))",
-                sparql_string(t)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" && ");
+    // LocalSearch's filename FTS already applies prefix AND matching, including
+    // its Unicode/diacritic normalization. A second raw substring filter would
+    // incorrectly discard normalized matches such as cafe / café.
+    let filter = "true";
     // TinySPARQL uses whitespace to AND prefix terms. Restrict each term to
     // alphanumeric text so FTS operators and punctuation stay out of its grammar.
     let pattern = query
@@ -330,7 +351,7 @@ pub fn filename_matches(query: &str, settings: &Settings, limit: usize) -> Resul
     );
     // Keep both lookups on GNOME's FTS index instead of scanning every filename.
     let mut records = filename_records(Some(&pattern), &exact, settings, limit)?;
-    records.extend(filename_records(Some(&pattern), &filter, settings, limit)?);
+    records.extend(filename_records(Some(&pattern), filter, settings, limit)?);
     let mut seen = std::collections::HashSet::new();
     let mut ranked: Vec<_> = records
         .into_iter()
@@ -372,7 +393,7 @@ fn filename_records(
     let candidate = pattern
         .map(|p| format!("?f fts:match {} .", sparql_string(p)))
         .unwrap_or_default();
-    let mut after = String::new();
+    let mut offset = 0;
     let mut eligible = vec![];
     loop {
         let query = format!(
@@ -380,17 +401,20 @@ fn filename_records(
         PREFIX fts: <http://tracker.api.gnome.org/ontology/v3/fts#>
         PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
         PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
-        SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
-        GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url . {candidate} }}
-        FILTER ({filter}) FILTER (STR(?url) > {}) }} ORDER BY ?url LIMIT 256",
-            sparql_string(&after)
+        SELECT DISTINCT ?url (tracker:id(?f) AS ?source) (STR(?rank) AS ?rank_text) ?modified ?accessed WHERE {{
+        GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url . {candidate}
+          OPTIONAL {{ ?f nfo:fileLastModified ?modified }}
+          OPTIONAL {{ ?f nfo:fileLastAccessed ?accessed }} }}
+        BIND({rank} AS ?rank)
+        FILTER ({filter}) }} ORDER BY DESC(?rank) DESC(?modified) DESC(?accessed) ?url LIMIT 256 OFFSET {offset}",
+            rank = if pattern.is_some() { "fts:rank(?f)" } else { "0" }
         );
-        let (records, last, read) = read_query(api, &connection, &query, settings, false)?;
+        let (records, _, read) = read_query(api, &connection, &query, settings, false)?;
         eligible.extend(records);
         if read < 256 || eligible.len() >= limit {
             break;
         }
-        after = last;
+        offset += read;
     }
     eligible.truncate(limit);
     Ok(eligible)
@@ -445,6 +469,13 @@ fn record_checked(uri: &str, allowed: impl Fn(&Path) -> bool) -> Result<Option<F
             .unwrap_or_else(|| "application/octet-stream".into())
     };
     Ok(Some(FileRecord {
+        search: crate::ranking::SearchMetadata {
+            modified: meta.mtime(),
+            // Readers can change filesystem atime. Only GNOME's indexed
+            // access timestamp is accepted as an access-recency signal.
+            accessed: 0,
+            ..Default::default()
+        },
         name: path
             .file_name()
             .unwrap_or_default()
@@ -452,19 +483,23 @@ fn record_checked(uri: &str, allowed: impl Fn(&Path) -> bool) -> Result<Option<F
             .into_owned(),
         uri: uri.into(),
         source_id: 0,
-        stamp: format!(
-            "{}:{}:{}:{}:{}",
-            meta.dev(),
-            meta.ino(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.len()
-        ),
+        stamp: file_stamp(&meta),
         size: meta.len(),
         folder: meta.is_dir(),
         path,
         mime,
     }))
+}
+
+pub(crate) fn file_stamp(meta: &fs::Metadata) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        meta.dev(),
+        meta.ino(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.len()
+    )
 }
 
 pub fn root_is_visible(root: &Path) -> bool {

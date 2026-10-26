@@ -126,12 +126,26 @@ view automatically. The window is reused when another query arrives from
 Activities. Large result sets use a virtualized list; searches return up to 5,000
 matches and ask you to refine the query if that limit is reached.
 
-Results are ranked together by relevance. An exact filename or title takes
-priority. Strong meaning matches can outrank incidental words in a filename or
-folder path, and a file that matches both its name and its contents receives a
-boost. Whole words count more than partial names. Matching passages are preserved
-so opening a result still takes you to the relevant page or moment. Activities
-and **Show All Results** use the same ranking.
+Results use filename quality, GNOME LocalSearch rank, document text, meaning,
+and GNOME's last-access/modification recency. Exact filenames and titles take
+priority; matching document text helps distinguish similarly named copies.
+There is no blanket preference for Documents or Downloads and no query-history
+tracking. GNOME's global search behavior is the baseline; folder proximity is
+not used.
+
+Activities shows one representative of byte-identical copies **only when an
+existing, still-current content hash proves they are identical**. The full
+results window keeps the other copies after distinct results. Unhashed files,
+changed files, and different revisions remain separate. Matching passages are
+preserved so opening a result takes you to the relevant page or moment.
+
+Filename and previously indexed text search remain available while the model
+starts, is busy, or fails. The results window explains when
+semantic search is unavailable. A slow model does not hold up filename lookup
+while you type. Semantic, multilingual, and multimodal retrieval still uses the
+same local model; no new model or dependency is installed for ranking.
+See the [ranking evaluation](docs/SEARCH_EVALUATION.md) for the regression corpus,
+stock GNOME Files comparison, measured latency, and limits of the results.
 
 <p align="center"><img src="docs/screenshots/results.png" width="640" alt="Native GSeek results showing seven filename matches from Downloads."></p>
 
@@ -187,8 +201,9 @@ using it. This mode does not assume a multimodal API: images, scanned-PDF visual
 pages, audio, and video require managed inference. Remote endpoints require HTTPS
 and explicit consent to upload content. Localhost requests bypass HTTP proxies.
 
-**Working embeddings are required.** If inference fails, GSeek shows the error
-and recovery controls; it does not quietly turn into filename-only search.
+**Semantic search needs working embeddings.** If inference fails, GSeek shows
+the reason and recovery controls. Ordinary GNOME filename results and previously
+indexed document text remain searchable; meaning-only queries need the model.
 
 ## Current limits
 

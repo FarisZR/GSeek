@@ -17,6 +17,12 @@
   <content_rating type="oars-1.1"/>
   <screenshots><screenshot type="default"><caption>GSeek setup</caption><image>https://raw.githubusercontent.com/FarisZR/GSeek/main/docs/screenshots/welcome.png</image></screenshot></screenshots>
   <releases>
+    <release version="0.2.3" date="2026-10-26">
+      <description>
+        <p>Find the right copy with improved filename matching, GNOME rank and recency, and document-text relevance. Activities avoids proven identical duplicates while Show All Results retains every copy.</p>
+        <p>Filename and indexed-text search stay responsive while the embedding model starts or is unavailable. Existing indexes and downloaded models are preserved.</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-10-22">
       <description>
         <p>Search results now combine filenames, document text, and semantic relevance. Exact filenames and titles take priority, strong meaning matches can beat incidental keywords, and matching name and content evidence receives a boost.</p>
