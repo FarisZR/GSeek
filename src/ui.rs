@@ -736,21 +736,11 @@ impl Window {
                             });
                             if ui.search_refresh_pending.get()
                                 && ui.main_stack.visible_child_name().as_deref() == Some("results")
+                                && !ui.settings_busy.get()
+                                && ui.settings_queue.borrow().is_empty()
                             {
-                                if s.ready
-                                    && !ui.settings_busy.get()
-                                    && ui.settings_queue.borrow().is_empty()
-                                {
-                                    ui.search_refresh_pending.set(false);
-                                    ui.search_files();
-                                } else if !s.ready {
-                                    ui.search_placeholder.set_title(if s.state == "error" {
-                                        "Search Unavailable"
-                                    } else {
-                                        "Updating Search"
-                                    });
-                                    ui.search_placeholder.set_description(Some(&s.detail));
-                                }
+                                ui.search_refresh_pending.set(false);
+                                ui.search_files();
                             }
                         }
                         Err(e) => {
@@ -1755,6 +1745,9 @@ mod tests {
                 assert!(view.retry.upgrade().unwrap().is_visible());
             }
             close_dialog(&ui.window);
+            ui.show_results("Show All Results");
+            until(|| ui.search_results.n_items() >= 7 && !ui.search_refresh_pending.get());
+            assert_ne!(ui.search_placeholder.title(), "Search Unavailable");
             ui.preferences(None);
             until(|| ui.window.visible_dialog().is_some());
             {
