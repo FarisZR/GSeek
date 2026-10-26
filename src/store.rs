@@ -202,12 +202,24 @@ impl Store {
             conn.execute_batch("BEGIN IMMEDIATE; ALTER TABLE files ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0; CREATE INDEX file_source ON files(source_id); PRAGMA user_version=3; COMMIT;")?;
         }
         if version < 4 {
-            conn.execute_batch(
-                "BEGIN IMMEDIATE;
+            let transaction = rusqlite::Transaction::new_unchecked(
+                &conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let current: u32 =
+                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if current > 4 {
+                bail!("This index was created by a newer GSeek; please upgrade the application");
+            }
+            if current < 4 {
+                transaction.execute_batch(
+                    "
                 ALTER TABLE files ADD COLUMN modified INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE files ADD COLUMN accessed INTEGER NOT NULL DEFAULT 0;
-                PRAGMA user_version=4; COMMIT;",
-            )?;
+                PRAGMA user_version=4;",
+                )?;
+            }
+            transaction.commit()?;
         }
         Ok(Self { conn })
     }
@@ -265,11 +277,11 @@ impl Store {
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
             ON CONFLICT(uri) DO UPDATE SET path=excluded.path,name=excluded.name,mime=excluded.mime,folded=excluded.folded,
             size=excluded.size,folder=excluded.folder,seen=CASE WHEN ?9<0 THEN files.seen ELSE excluded.seen END,source_id=CASE WHEN excluded.source_id!=0 THEN excluded.source_id ELSE files.source_id END,
-            state=CASE WHEN files.stamp!=excluded.stamp THEN excluded.state ELSE files.state END,stamp=excluded.stamp",
+            state=CASE WHEN files.stamp!=excluded.stamp THEN excluded.state ELSE files.state END,accessed=CASE WHEN files.stamp=excluded.stamp THEN files.accessed ELSE 0 END,stamp=excluded.stamp",
             params![file.uri, file.path.to_string_lossy(), file.name, file.mime, folded(&file.path.to_string_lossy()),
                 file.stamp, i64::try_from(file.size).unwrap_or(i64::MAX), file.folder, generation, if file.folder { "indexed" } else { "pending" },file.source_id])?;
         self.conn.execute(
-            "UPDATE files SET modified=?2,accessed=?3 WHERE uri=?1",
+            "UPDATE files SET modified=?2,accessed=CASE WHEN ?3>0 THEN ?3 ELSE accessed END WHERE uri=?1",
             params![file.uri, file.search.modified, file.search.accessed],
         )?;
         if let Some(tx) = tx {
@@ -1659,6 +1671,55 @@ mod tests {
                 .query_row("SELECT part FROM chunks", [], |row| row.get(0))?;
             assert_eq!(part, 0);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_version_three_opens_migrate_once() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("index.sqlite");
+        let store = Store::open(&path)?;
+        store.conn.execute_batch("ALTER TABLE files DROP COLUMN modified; ALTER TABLE files DROP COLUMN accessed; PRAGMA user_version=3;")?;
+        drop(store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                std::thread::spawn(move || -> Result<()> {
+                    barrier.wait();
+                    let store = Store::open(&path)?;
+                    let version: u32 = store
+                        .conn
+                        .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                    assert_eq!(version, 4);
+                    Ok(())
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_reads_cannot_create_or_replace_access_recency() -> Result<()> {
+        let (_dir, store, settings, file) = fixture()?;
+        let mut indexed = file.clone();
+        indexed.search.accessed = now() - 180 * 86400;
+        indexed.stamp = crate::discovery::file_stamp(&std::fs::metadata(&file.path)?);
+        store.discover(&indexed, 1)?;
+        std::fs::read(&file.path)?;
+        let stat = crate::discovery::record_from_uri(&file.uri, &settings)?.unwrap();
+        assert_eq!(stat.search.accessed, 0);
+        store.discover(&stat, 1)?;
+        let accessed: i64 = store.conn.query_row(
+            "SELECT accessed FROM files WHERE uri=?1",
+            [&file.uri],
+            |r| r.get(0),
+        )?;
+        assert_eq!(accessed, indexed.search.accessed);
         Ok(())
     }
     #[test]

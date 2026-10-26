@@ -116,8 +116,10 @@ fn query_for(settings: &Settings, filter: &str, paged: bool) -> String {
         "PREFIX tracker: <http://tracker.api.gnome.org/ontology/v3/tracker#>
       PREFIX nfo: <http://tracker.api.gnome.org/ontology/v3/nfo#>
       PREFIX nie: <http://tracker.api.gnome.org/ontology/v3/nie#>
-      SELECT DISTINCT ?url (tracker:id(?f) AS ?source) WHERE {{
-      GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url }}
+      SELECT DISTINCT ?url (tracker:id(?f) AS ?source) (STR(0) AS ?rank_text) ?modified ?accessed WHERE {{
+      GRAPH tracker:FileSystem {{ ?f a nfo:FileDataObject ; nie:url ?url
+        OPTIONAL {{ ?f nfo:fileLastModified ?modified }}
+        OPTIONAL {{ ?f nfo:fileLastAccessed ?accessed }} }}
       FILTER ({filter}) FILTER ({}) }} ORDER BY ?url {limit}",
         if scope.is_empty() { "false" } else { &scope }
     )
@@ -212,7 +214,7 @@ fn read_query(
             record_for_search(&uri, settings)?
         };
         if let Some(mut record) = record {
-            if !content_scope {
+            {
                 let value = |column| {
                     let raw = unsafe { (api.string_at)(cursor, column, ptr::null_mut()) };
                     if raw.is_null() {
@@ -469,7 +471,9 @@ fn record_checked(uri: &str, allowed: impl Fn(&Path) -> bool) -> Result<Option<F
     Ok(Some(FileRecord {
         search: crate::ranking::SearchMetadata {
             modified: meta.mtime(),
-            accessed: meta.atime(),
+            // Readers can change filesystem atime. Only GNOME's indexed
+            // access timestamp is accepted as an access-recency signal.
+            accessed: 0,
             ..Default::default()
         },
         name: path

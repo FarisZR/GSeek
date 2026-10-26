@@ -51,8 +51,10 @@ existing EmbeddingGemma thresholds and only the active pipeline's vectors.
 These relevance scores are heuristic, not probabilities or inferred scan quality.
 
 A separate single-slot inference queue bounds model work. Known-file requests give
-a warm model at most 150 ms; requests with no lexical matches allow up to five
-seconds for initial semantic inference. Waiting checks request generation every
+a warm model at most 150 ms. Overview and the native window have independent
+lexical workers, so a cold window query cannot delay Overview queries. Requests
+with no lexical matches allow up to five seconds for initial semantic inference.
+Waiting checks request generation every
 10 ms so later typing is not stuck behind a cold semantic query. Filename and
 text lookup work during model startup/failure, with a separate `semantic_error`
 status shown in the native results window. Stale results are dropped separately
@@ -65,6 +67,11 @@ its numeric-rank ordered pages apply eligibility checks before counting results.
 No content is read merely to rank a filename candidate. Existing metadata stats
 and hashes are reused. Schema 4 adds access/modification columns; migration keeps
 all existing text, vectors and model downloads, without a reindex.
+Only GNOME's indexed timestamps supply access recency: filesystem atime is not
+used, since indexing readers can change it. Metadata-only refreshes preserve an
+already known access timestamp, and a changed file stamp clears it unless GNOME
+provides a replacement. The schema upgrade rechecks its version under SQLite's
+write lock so overlapping opens cannot apply it twice.
 
 After ranking, an existing content identity suppresses a duplicate in Overview
 only if the file is fully indexed and its current metadata stamp still matches

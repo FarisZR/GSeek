@@ -804,12 +804,18 @@ class EndToEnd(unittest.TestCase):
                 pending = pool.submit(self.search, "unmatched-concept-93827465")
                 self.assertTrue(entered.wait(3))
                 started = time.monotonic()
+                ids = self.invoke("GetInitialResultSet", GLib.Variant("(as)", (["Rental", "Agreement"],)), SHELL_IFACE, PROVIDER)[0]
+                overview_elapsed = time.monotonic() - started
+                self.assertEqual(ids[0], (self.docs / "Rental Agreement.txt").as_uri())
+                self.assertLess(overview_elapsed, 1.0)
+                self.assertFalse(pending.done(), "Overview must not wait for or cancel the independent window query")
+                started = time.monotonic()
                 hits = self.search("Rental Agreement")
                 elapsed = time.monotonic() - started
                 self.assertEqual(hits[0]["name"], "Rental Agreement.txt")
                 self.assertLess(elapsed, 1.0)
                 self.assertEqual(pending.result(timeout=1), [])
-                print(json.dumps({"benchmark": "stalled inference while typing", "filename_latency_ms": round(elapsed * 1000)}), flush=True)
+                print(json.dumps({"benchmark": "stalled inference while typing", "filename_latency_ms": round(elapsed * 1000), "overview_latency_ms": round(overview_elapsed * 1000)}), flush=True)
         finally:
             release.set()
             server.shutdown()

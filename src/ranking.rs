@@ -1,5 +1,4 @@
 //! Comparable relevance signals for one ranking across all search sources.
-use crate::store::folded;
 use std::path::Path;
 
 pub(crate) const SEMANTIC_FLOOR: f64 = 0.30;
@@ -60,8 +59,9 @@ pub(crate) fn recency(metadata: &SearchMetadata, now: i64) -> f64 {
 }
 
 pub(crate) fn context(query: &str, name: &str, metadata: &SearchMetadata, now: i64) -> f64 {
-    // Keep these secondary to filename class / semantic confidence. Within a
-    // class, retain GNOME's actual FTS magnitude, match position and recency.
+    // Secondary to the hard exact-name/title bands (3 / 2). Ordinary matches
+    // are soft evidence: like GNOME global search, recency may outweigh a small
+    // prefix/word-quality difference. Do not shrink recency into a tie-break.
     let fts = if metadata.fts_rank.is_finite() {
         metadata.fts_rank.clamp(0.0, 50.0)
     } else {
@@ -112,7 +112,7 @@ pub(crate) fn filename(query: &str, name: &str, path: &Path) -> f64 {
     if query.split_whitespace().all(|term| name.contains(term)) {
         return 0.35;
     }
-    let path = folded(&path.to_string_lossy());
+    let path = comparable(&path.to_string_lossy());
     if query.split_whitespace().all(|term| path.contains(term)) {
         0.15
     } else {
@@ -136,4 +136,56 @@ pub(crate) fn combined(lexical: f64, cosine: Option<f64>) -> f64 {
     }
     let strongest = lexical.max(semantic);
     strongest + 0.5 * lexical.min(semantic) * (1.0 - strongest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_names_keep_priority_under_maximum_secondary_evidence() {
+        let now = 1_800_000_000;
+        let recent = SearchMetadata {
+            fts_rank: 50.0,
+            modified: now,
+            accessed: now,
+        };
+        let path = Path::new("/tmp/report.pdf.txt");
+        let full = combined(filename("report.pdf", "report.pdf", path), None);
+        let title = combined(filename("report.pdf", "report.pdf.txt", path), Some(1.0))
+            + context("report.pdf", "report.pdf.txt", &recent, now)
+            + 0.12;
+        assert!(full > title);
+        let title = combined(filename("report", "report.pdf", path), None);
+        let partial = combined(filename("report", "report archive.pdf", path), Some(1.0))
+            + context("report", "report archive.pdf", &recent, now)
+            + 0.12;
+        assert!(title > partial);
+    }
+
+    #[test]
+    fn accented_path_matching_uses_the_same_normalization_as_the_query() {
+        assert_eq!(
+            filename("café docs", "docs.txt", Path::new("/tmp/café/docs.txt")),
+            filename("cafe docs", "docs.txt", Path::new("/tmp/cafe/docs.txt"))
+        );
+        assert!(filename("café docs", "docs.txt", Path::new("/tmp/café/docs.txt")) > 0.0);
+    }
+
+    #[test]
+    fn ordinary_filename_evidence_allows_gnome_recency_to_resolve_close_matches() {
+        let now = 1_800_000_000;
+        let recent = SearchMetadata {
+            fts_rank: 50.0,
+            modified: now,
+            accessed: now,
+        };
+        let old = SearchMetadata::default();
+        let path = Path::new("/tmp/file.txt");
+        let older_words = filename("project plan", "plan project.txt", path)
+            + context("project plan", "plan project.txt", &old, now);
+        let recent_prefix = filename("project plan", "planning project.txt", path)
+            + context("project plan", "planning project.txt", &recent, now);
+        assert!(recent_prefix > older_words);
+    }
 }

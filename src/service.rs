@@ -517,6 +517,7 @@ struct SemanticJob {
     reply: mpsc::Sender<Result<(Vec<f32>, String), String>>,
 }
 struct SearchQueue {
+    ui_sender: mpsc::SyncSender<SearchJob>,
     sender: mpsc::SyncSender<SearchJob>,
     shell: Arc<AtomicU64>,
     ui: Arc<AtomicU64>,
@@ -524,6 +525,7 @@ struct SearchQueue {
 impl SearchQueue {
     fn new(paths: &Paths, work: WorkControl, shared: Shared) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<SearchJob>(32);
+        let (ui_sender, ui_receiver) = mpsc::sync_channel::<SearchJob>(32);
         let paths = paths.clone();
         let paths_for_search = paths.clone();
         let shell = Arc::new(AtomicU64::new(0));
@@ -569,15 +571,19 @@ impl SearchQueue {
                 }
             }
         });
-        let paths = paths_for_search;
-        std::thread::spawn(move || {
-            while let Ok(job) = receiver.recv() {
-                let generation = if job.shell { &wshell } else { &wui };
-                if generation.load(Ordering::Relaxed) != job.generation {
-                    let _ = job.reply.send_blocking(Ok(vec![]));
-                    continue;
-                }
-                let result = (|| -> Result<Vec<SearchHit>> {
+        for (receiver, counter) in [(receiver, wshell), (ui_receiver, wui)] {
+            let paths = paths_for_search.clone();
+            let work = work.clone();
+            let shared = shared.clone();
+            let semantic_tx = semantic_tx.clone();
+            std::thread::spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let generation = &counter;
+                    if generation.load(Ordering::Relaxed) != job.generation {
+                        let _ = job.reply.send_blocking(Ok(vec![]));
+                        continue;
+                    }
+                    let result = (|| -> Result<Vec<SearchHit>> {
                     let settings = paths.load()?;
                     let query_settings = serde_json::to_string(&settings)?;
                     if !settings.configured { bail!("Complete GSeek setup before searching"); }
@@ -621,10 +627,16 @@ impl SearchQueue {
                     if job.shell { hits.retain(|hit| !hit.duplicate); }
                     Ok(hits)
                 })().map_err(|e| format!("{e:#}"));
-                let _ = job.reply.send_blocking(result);
-            }
-        });
-        Self { sender, shell, ui }
+                    let _ = job.reply.send_blocking(result);
+                }
+            });
+        }
+        Self {
+            sender,
+            ui_sender,
+            shell,
+            ui,
+        }
     }
     fn submit(
         &self,
@@ -638,7 +650,8 @@ impl SearchQueue {
         let counter = if shell { &self.shell } else { &self.ui };
         let generation = counter.fetch_add(1, Ordering::Relaxed) + 1;
         let (reply, rx) = async_channel::bounded(1);
-        self.sender
+        let sender = if shell { &self.sender } else { &self.ui_sender };
+        sender
             .try_send(SearchJob {
                 query,
                 limit: limit.clamp(1, crate::store::MAX_RESULTS),
