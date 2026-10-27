@@ -344,7 +344,55 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        self.conn.execute("INSERT INTO metadata VALUES('scope',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&settings)?])?;
+        self.prune_scope_rows(&settings)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A disconnected folder link may resolve after startup. Refresh only the
+    /// committed policy, under its write lock, so a stale scan cannot overwrite
+    /// a newer exclusion while adapting to the reconnected drive.
+    pub fn refresh_scope(&self) -> Result<bool> {
+        let current: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM metadata WHERE key='scope'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let resolved = serde_json::from_str::<Settings>(&current)?.normalized()?;
+        if serde_json::to_string(&resolved)? == current {
+            return Ok(false);
+        }
+        // Most discovery ticks are read-only. Re-read after acquiring the
+        // write lock: preferences may have changed since the comparison.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let scope: Option<String> = tx
+            .query_row("SELECT value FROM metadata WHERE key='scope'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let changed = if let Some(scope) = scope {
+            let settings = serde_json::from_str::<Settings>(&scope)?.normalized()?;
+            let changed = serde_json::to_string(&settings)? != scope;
+            if changed {
+                self.prune_scope_rows(&settings)?;
+            }
+            changed
+        } else {
+            false
+        };
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    fn prune_scope_rows(&self, settings: &Settings) -> Result<()> {
+        self.conn.execute("INSERT INTO metadata VALUES('scope',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(settings)?])?;
         let mut stmt = self.conn.prepare("SELECT uri,path FROM files")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
@@ -372,7 +420,6 @@ impl Store {
                     .execute("DELETE FROM activity WHERE path=?1", [path])?;
             }
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -1372,6 +1419,71 @@ mod tests {
         assert_eq!(store.content_progress("private-hash")?, 0);
         Ok(())
     }
+    #[test]
+    fn reconnected_folder_links_refresh_only_the_committed_scope() -> Result<()> {
+        let (dir, _, mut settings, mut file) = fixture()?;
+        let db = dir.path().join("scope.sqlite3");
+        let control = Store::open(&db)?;
+        let discovery = Store::open(&db)?;
+        let target = dir.path().join("Reconnected Drive");
+        let link = dir.path().join("Drive Link");
+        std::os::unix::fs::symlink(&target, &link)?;
+        settings.folders = vec![link];
+        control.prune_scope(&settings)?;
+        assert!(!discovery.refresh_scope()?);
+        std::fs::create_dir(&target)?;
+        file.path = target.join("Private.txt");
+        file.uri = url::Url::from_file_path(&file.path).unwrap().to_string();
+        std::fs::write(&file.path, "reconnected drive")?;
+        assert!(discovery.refresh_scope()?);
+        discovery.discover(&file, 1)?;
+        assert_eq!(control.counts()?.files, 1);
+        // A settings edit wins over the discovery connection's older snapshot.
+        settings.excluded_folders.push(target);
+        control.prune_scope(&settings)?;
+        assert!(!discovery.refresh_scope()?);
+        discovery.discover(&file, 1)?;
+        assert_eq!(control.counts()?.files, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn reconnected_exclusion_links_prune_previously_saved_content() -> Result<()> {
+        let (dir, store, mut settings, mut file) = fixture()?;
+        let archive = dir.path().join("Disconnected Archive");
+        let link = dir.path().join("Archive Link");
+        std::os::unix::fs::symlink(&archive, &link)?;
+        file.path = archive.join("Private.txt");
+        file.uri = url::Url::from_file_path(&file.path).unwrap().to_string();
+        store.discover(&file, 1)?;
+        store.checkpoint_for(
+            &file,
+            "offline-hash",
+            "model",
+            0,
+            &StoredChunk {
+                text: "offline private content".into(),
+                vector: Some(query_vector()),
+                page: None,
+                seconds: None,
+            },
+        )?;
+        store.finish_content("offline-hash")?;
+        store.complete(&file.uri, "offline-hash")?;
+        settings.excluded_folders.push(link);
+        store.prune_scope(&settings)?;
+        assert_eq!(store.counts()?.files, 1);
+        std::fs::create_dir(&archive)?;
+        std::fs::write(&file.path, "offline private content")?;
+        assert!(store.refresh_scope()?);
+        assert_eq!(store.counts()?.files, 0);
+        assert_eq!(store.content_progress("offline-hash")?, 0);
+        assert!(store.activity()?.is_empty());
+        store.discover(&file, 1)?;
+        assert_eq!(store.counts()?.files, 0);
+        Ok(())
+    }
+
     #[test]
     fn excluding_a_linked_folder_removes_its_indexed_target_and_queue() -> Result<()> {
         let (dir, store, mut settings, mut indexed) = fixture()?;

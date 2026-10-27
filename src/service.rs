@@ -694,6 +694,10 @@ fn discovery_loop(
             }
         }
         let settings = paths.load()?;
+        if store.refresh_scope()? {
+            full = true;
+            next = Instant::now();
+        }
         if settings.configured
             && Instant::now() >= next
             && (full || !changed.is_empty() || last_full.elapsed() >= Duration::from_secs(300))

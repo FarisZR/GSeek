@@ -115,6 +115,8 @@ within the same transaction, so an older scan or interrupted worker cannot
 reinsert excluded data. Included duplicate files retain their shared vectors.
 Folder selections resolve symbolic links to GNOME's host paths before saving,
 querying, and pruning; unavailable locations remain saved for disconnected drives.
+Discovery refreshes the committed scope and rescans when a previously unavailable
+link resolves, without replacing newer exclusion settings.
 Status reads queue counts from the committed database so an interrupted worker
 cannot make removed files appear queued again.
 

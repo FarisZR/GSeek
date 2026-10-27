@@ -1530,24 +1530,14 @@ mod tests {
     #[ignore = "Needs a private session bus, display, and GTK_USE_PORTAL=1"]
     fn folder_picker_requests_and_keeps_multiple_directories() -> Result<()> {
         use glib::variant::ObjectPath;
-        use std::collections::HashMap;
-        let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
-        let owned = bus.call_sync(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
-            "RequestName",
-            Some(&("org.freedesktop.portal.Desktop", 4u32).to_variant()),
-            None,
-            gio::DBusCallFlags::NONE,
-            1000,
-            gio::Cancellable::NONE,
-        )?;
-        assert_eq!(
-            owned.get::<(u32,)>(),
-            Some((1,)),
-            "Run this test in a private dbus-run-session"
-        );
+        use std::{
+            collections::HashMap,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+                mpsc,
+            },
+        };
         let root = tempfile::Builder::new()
             .prefix("gseek-chooser-")
             .tempdir()?;
@@ -1561,8 +1551,22 @@ mod tests {
             .iter()
             .map(|path| gio::File::for_path(path).uri().to_string())
             .collect();
-        let calls = Rc::new(Cell::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
+        let (ready, started) = mpsc::channel();
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        // Native GTK probes the portal version synchronously. Its service
+        // needs an independent context even while GTK's thread is blocked.
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let context = glib::MainContext::new();
+            context.with_thread_default(|| -> Result<()> {
+        let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
+        let owned = bus.call_sync(
+            Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", "org.freedesktop.DBus",
+            "RequestName", Some(&("org.freedesktop.portal.Desktop", 4u32).to_variant()),
+            None, gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE,
+        )?;
+        assert_eq!(owned.get::<(u32,)>(), Some((1,)), "Run this test in a private dbus-run-session");
         let info = gio::DBusNodeInfo::for_xml(
             "<node><interface name='org.freedesktop.portal.FileChooser'><property name='version' type='u' access='read'/><method name='OpenFile'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='a{sv}' direction='in'/><arg type='o' direction='out'/></method></interface></node>",
         )?;
@@ -1579,9 +1583,8 @@ mod tests {
                     assert_eq!(options["multiple"].get::<bool>(), Some(true));
                     assert_eq!(
                         options["accept_label"].get::<String>().unwrap(),
-                        if count.get() == 0 { "Add" } else { "Exclude" }
+                        if count.fetch_add(1, Ordering::Relaxed) == 0 { "Add" } else { "Exclude" }
                     );
-                    count.set(count.get() + 1);
                     let sender = sender.unwrap();
                     let token = options["handle_token"].get::<String>().unwrap();
                     let handle = format!(
@@ -1596,20 +1599,35 @@ mod tests {
                     // user accepting the native dialog would.
                     let connection = connection.clone();
                     let sender = sender.to_owned();
-                    glib::timeout_add_local_once(Duration::from_millis(50), move || {
+                    let response = (0u32, result).to_variant();
+                    glib::timeout_source_new(Duration::from_millis(50), None, glib::Priority::DEFAULT, move || {
                         connection
                             .emit_signal(
                                 Some(&sender),
                                 &handle,
                                 "org.freedesktop.portal.Request",
                                 "Response",
-                                Some(&(0u32, result).to_variant()),
+                                Some(&response),
                             )
                             .unwrap();
-                    });
+                        glib::ControlFlow::Break
+                    }).attach(Some(&glib::MainContext::ref_thread_default()));
                 },
             )
             .build()?;
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        let shutdown = main_loop.clone();
+        context.spawn_local(async move {
+            let _ = stopped.recv().await;
+            shutdown.quit();
+        });
+        ready.send(())?;
+        main_loop.run();
+        bus.unregister_object(registration)?;
+        Ok(())
+        })?
+        });
+        started.recv_timeout(Duration::from_secs(5))?;
         adw::init()?;
         let parent = gtk::Window::new();
         parent.present();
@@ -1624,9 +1642,10 @@ mod tests {
             until(|| saved.borrow().is_some());
             assert_eq!(saved.borrow().as_ref().unwrap(), &chosen);
         }
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         parent.close();
-        bus.unregister_object(registration)?;
+        drop(stop);
+        worker.join().unwrap()?;
         Ok(())
     }
     fn backend_row(widget: &gtk::Widget) -> Option<adw::ComboRow> {
