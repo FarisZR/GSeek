@@ -339,11 +339,12 @@ impl Store {
     }
 
     pub fn prune_scope(&self, settings: &Settings) -> Result<()> {
+        let settings = settings.normalized()?;
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        self.conn.execute("INSERT INTO metadata VALUES('scope',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(settings)?])?;
+        self.conn.execute("INSERT INTO metadata VALUES('scope',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&settings)?])?;
         let mut stmt = self.conn.prepare("SELECT uri,path FROM files")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
@@ -1369,6 +1370,46 @@ mod tests {
         assert!(!store.checkpoint_for(&file, "private-hash", "model", 0, &chunk)?);
         assert_eq!(store.counts()?.pending, 0);
         assert_eq!(store.content_progress("private-hash")?, 0);
+        Ok(())
+    }
+    #[test]
+    fn excluding_a_linked_folder_removes_its_indexed_target_and_queue() -> Result<()> {
+        let (dir, store, mut settings, mut indexed) = fixture()?;
+        let archive = dir.path().join("Archive");
+        std::fs::create_dir(&archive)?;
+        let link = dir.path().join("Archive Link");
+        std::os::unix::fs::symlink(&archive, &link)?;
+        indexed.path = archive.join("Indexed.txt");
+        indexed.uri = url::Url::from_file_path(&indexed.path).unwrap().to_string();
+        std::fs::write(&indexed.path, "private archive")?;
+        let mut queued = indexed.clone();
+        queued.path = archive.join("Queued.txt");
+        queued.uri = url::Url::from_file_path(&queued.path).unwrap().to_string();
+        std::fs::write(&queued.path, "queued private archive")?;
+        store.discover(&indexed, 1)?;
+        store.discover(&queued, 1)?;
+        store.checkpoint_for(
+            &indexed,
+            "archive-hash",
+            "model",
+            0,
+            &StoredChunk {
+                text: "private archive".into(),
+                vector: Some(query_vector()),
+                page: None,
+                seconds: None,
+            },
+        )?;
+        store.finish_content("archive-hash")?;
+        store.complete(&indexed.uri, "archive-hash")?;
+        settings.excluded_folders.push(link);
+        store.prune_scope(&settings)?;
+        assert_eq!(store.counts()?.files, 0);
+        assert_eq!(store.content_progress("archive-hash")?, 0);
+        assert!(store.activity()?.is_empty());
+        // A scan holding the original host path must not reinsert the target.
+        store.discover(&queued, 1)?;
+        assert_eq!(store.counts()?.files, 0);
         Ok(())
     }
     #[test]

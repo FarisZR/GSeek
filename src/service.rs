@@ -280,9 +280,14 @@ pub fn run(paths: Paths) -> Result<()> {
                     // Synchronous control methods are tiny metadata operations; inference and discovery run elsewhere.
                     let result = (|| -> Result<Option<glib::Variant>> {
                         match method {
-                            "Status" => Ok(Some(
-                                (serde_json::to_string(&*state.lock().unwrap())?,).to_variant(),
-                            )),
+                            "Status" => {
+                                let mut current = state.lock().unwrap().clone();
+                                // A worker may still publish a count captured before an
+                                // exclusion. Report the committed queue, including while
+                                // a cancelled helper is shutting down or restarting.
+                                current.counts = Store::open(&paths.database())?.counts()?;
+                                Ok(Some((serde_json::to_string(&current)?,).to_variant()))
+                            }
                             "Settings" => {
                                 Ok(Some((serde_json::to_string(&paths.load()?)?,).to_variant()))
                             }
@@ -307,6 +312,7 @@ pub fn run(paths: Paths) -> Result<()> {
                                 } else {
                                     previous.patched(serde_json::from_str(&json)?)?
                                 };
+                                let settings = settings.normalized()?;
                                 paths.save(&settings)?;
                                 work.interrupt();
                                 let store = match Store::open(&paths.database()).and_then(|store| {

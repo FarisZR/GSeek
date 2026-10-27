@@ -83,13 +83,12 @@ impl Paths {
         }
         let result: Settings = serde_json::from_slice(&fs::read(self.settings())?)
             .context("Cannot read settings; the existing file has been preserved")?;
-        result.validate()?;
-        Ok(result)
+        result.normalized()
     }
     pub fn save(&self, settings: &Settings) -> Result<()> {
-        settings.validate()?;
+        let settings = settings.normalized()?;
         self.init()?;
-        atomic_write(&self.settings(), &serde_json::to_vec_pretty(settings)?)
+        atomic_write(&self.settings(), &serde_json::to_vec_pretty(&settings)?)
     }
 }
 
@@ -216,6 +215,19 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// GNOME indexes host paths, while a folder chooser may return a symlink.
+    /// Resolve both kinds of roots consistently before querying or pruning.
+    /// Keep unavailable locations so a disconnected drive does not lose its settings.
+    pub fn normalized(&self) -> Result<Self> {
+        self.validate()?;
+        let mut settings = self.clone();
+        for folders in [&mut settings.folders, &mut settings.excluded_folders] {
+            normalize_folders(folders);
+        }
+        settings.validate()?;
+        Ok(settings)
+    }
+
     /// Merge an individual preference against the latest saved settings.
     /// This prevents one open page from overwriting unrelated changes.
     pub fn patched(&self, patch: serde_json::Value) -> Result<Self> {
@@ -292,6 +304,16 @@ impl Settings {
     }
 }
 
+pub fn normalize_folders(folders: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    for folder in folders.iter_mut() {
+        if let Ok(real) = fs::canonicalize(&*folder) {
+            *folder = real;
+        }
+    }
+    folders.retain(|folder| seen.insert(folder.clone()));
+}
+
 fn sensitive(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -312,6 +334,43 @@ fn sensitive(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_choices_resolve_links_deduplicate_and_preserve_unavailable_roots() -> Result<()> {
+        let root = tempfile::Builder::new()
+            .prefix("gseek-folders-")
+            .tempdir()?;
+        let archive = root.path().join("Archive");
+        fs::create_dir(&archive)?;
+        let link = root.path().join("Archive Link");
+        std::os::unix::fs::symlink(&archive, &link)?;
+        let unavailable = root.path().join("Disconnected Drive");
+        let paths = Paths {
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+            cache: root.path().join("cache"),
+        };
+        let settings = Settings {
+            folders: vec![link.clone(), archive.clone(), unavailable.clone()],
+            excluded_folders: vec![link, archive.clone()],
+            ..Default::default()
+        };
+        paths.save(&settings)?;
+        let saved = paths.load()?;
+        assert_eq!(saved.folders, vec![archive.clone(), unavailable]);
+        assert_eq!(saved.excluded_folders, vec![archive.clone()]);
+        assert!(!saved.allows(&archive.join("private.txt")));
+        // Resolving an alias to / must not bypass the root-folder restriction.
+        let root_link = root.path().join("Root Link");
+        std::os::unix::fs::symlink("/", &root_link)?;
+        let invalid = Settings {
+            excluded_folders: vec![root_link],
+            ..settings
+        };
+        assert!(paths.save(&invalid).is_err());
+        assert_eq!(paths.load()?.excluded_folders, vec![archive]);
+        Ok(())
+    }
     #[test]
     fn defaults_keep_downloads_out_of_content_search() {
         let settings = Settings::default();
