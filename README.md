@@ -3,12 +3,14 @@
 <p align="center"><b>Find your files by what you remember.</b><br>
 Private, multilingual search in GNOME Activities, powered by
 <a href="https://huggingface.co/google/embeddinggemma-2">EmbeddingGemma 2</a>.</p>
-<p align="center"><a href="#install"><b>Install with Flatpak</b></a> ·
+<p align="center"><a href="docs/media/gseek-demo.mp4?raw=1"><img src="docs/media/demo-preview.gif" width="900" alt="Real GNOME Activities searches finding a penguin photo, an aurora video, and a clause inside a Word document by meaning."></a></p>
+
+<p align="center"><a href="https://flatpak.fariszr.com/gseek.flatpakref"><img src="docs/media/download-flatpak.svg" width="260" height="56" alt="Download as Flatpak"></a></p>
+
+<p align="center"><a href="docs/media/gseek-demo.mp4?raw=1"><b>Watch the demo</b></a> ·
 <a href="https://github.com/FarisZR/GSeek/releases/latest">Releases</a> ·
 <a href="docs/DEVELOPMENT.md">Build and contribute</a><br>
 <sub>Native GTK4 and libadwaita. No account. No telemetry.</sub></p>
-
-<p align="center"><img src="docs/screenshots/overview.png" width="900" alt="GNOME Activities finding Rental Agreement.txt through GSeek when searching for the clause about pets in my lease."></p>
 
 Describe a document, picture, or moment in a recording. GSeek finds the match in
 the GNOME overview you already use. The native app manages setup, indexing
@@ -16,11 +18,17 @@ activity, and preferences.
 
 ## What you can find
 
-- **Meaning:** “the clause about pets in my lease” finds the agreement, even if its filename tells you nothing.
-- **Languages:** search in German for an English document, or in Arabic for a German invoice. English, German, Arabic, and cross-language retrieval are tested with the real model.
+- **Photos:** “the little bird dressed for a black tie dinner” finds the penguin in `IMG_0841.jpg`.
+- **Video:** “the video where Earth is wearing a green halo” finds an aurora in `VID_0312.mp4`.
+- **Documents:** “can my kitten live with me in the new apartment?” finds the relevant clause in `Agreement-17.docx`.
+- **Languages:** describe the same photo in Arabic, or search in German for an English document. English, German, Arabic, and cross-language retrieval are tested with the real model.
 - **Exact details:** filenames, paths, invoice numbers, and words inside documents contribute to ranking alongside semantic similarity.
 - **Media:** pictures and screenshots, PDF text and scanned pages, audio segments, and sampled video frames share the model’s embedding space.
 - **Your usual files:** native file icons, existing thumbnails, folders, and opening results in their default applications.
+
+The demo uses a small, curated library of public-domain media and fictional
+documents. Searches run through the real local model and GNOME provider;
+results are not scripted. [Recording details and media credits](docs/PRESENTATION.md).
 
 ## Install
 
@@ -147,7 +155,7 @@ same local model; no new model or dependency is installed for ranking.
 See the [ranking evaluation](docs/SEARCH_EVALUATION.md) for the regression corpus,
 stock GNOME Files comparison, measured latency, and limits of the results.
 
-<p align="center"><img src="docs/screenshots/results.png" width="640" alt="Native GSeek results showing seven filename matches from Downloads."></p>
+<p align="center"><img src="docs/screenshots/results.png" width="640" alt="Native GSeek results finding a Word agreement by the companion-animal clause in its contents."></p>
 
 ## Default Exclusions
 
