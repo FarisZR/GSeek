@@ -102,6 +102,8 @@ jobs:
           cargo test --locked --all-targets
           cargo test --locked --no-default-features --lib
           cargo build --locked
+      - name: Native multi-folder picker contract
+        run: xvfb-run -a dbus-run-session -- env GTK_USE_PORTAL=1 cargo test --locked --lib ui::tests::folder_picker -- --ignored --test-threads=1
       - name: Prepare integration fixture
         if: needs.scope.outputs.search == 'true'
         shell: bash

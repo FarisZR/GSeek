@@ -915,7 +915,7 @@ impl Window {
         content.append(&description);
         let locations = adw::PreferencesGroup::builder()
             .title("Choose Folders")
-            .description("Only files also included in GNOME’s Search Locations can be embedded.")
+            .description("Only files also included in GNOME’s Search Locations can be embedded. Use Ctrl-click or Shift-click to select several folders.")
             .build();
         let folders = gtk::ListBox::new();
         folders.add_css_class("boxed-list");
@@ -1005,7 +1005,7 @@ impl Window {
             .title("Search")
             .icon_name("system-search-symbolic")
             .build();
-        let locations=adw::PreferencesGroup::builder().title("Content Search Folders").description("Embed content from these folders in GNOME’s search locations. Other files remain searchable by name. Hidden files, credentials, caches, and build outputs are excluded.").build();
+        let locations=adw::PreferencesGroup::builder().title("Content Search Folders").description("Embed content from these folders in GNOME’s search locations. Other files remain searchable by name. Use Ctrl-click or Shift-click to select several folders.").build();
         let folder_list = gtk::ListBox::new();
         folder_list.add_css_class("boxed-list");
         folder_list.set_selection_mode(gtk::SelectionMode::None);
@@ -1018,6 +1018,7 @@ impl Window {
         page.add(&locations);
         let exclusions = adw::PreferencesGroup::builder()
             .title("Excluded Folders")
+            .description("Remove these folders from all results and delete their indexed content and queued files. Use Ctrl-click or Shift-click to select several folders.")
             .build();
         let exclude_list = gtk::ListBox::new();
         exclude_list.add_css_class("boxed-list");
@@ -1271,6 +1272,7 @@ fn add_selected_folders(folders: &mut Vec<std::path::PathBuf>, selected: &gio::L
             folders.push(path);
         }
     }
+    crate::config::normalize_folders(folders);
 }
 
 fn reader_status_group() -> adw::PreferencesGroup {
@@ -1412,18 +1414,10 @@ fn connect_folder_picker(
     let draft = draft.clone();
     let weak = Rc::downgrade(ui);
     button.connect_clicked(move |_| {
-        let picker = gtk::FileDialog::builder()
-            .title(if excluded {
-                "Exclude Folders"
-            } else {
-                "Choose Search Folders"
-            })
-            .modal(true)
-            .build();
         let list = list.clone();
         let draft = draft.clone();
         let weak = weak.clone();
-        picker.select_multiple_folders(Some(&parent), gio::Cancellable::NONE, move |result| {
+        select_folders(&parent, excluded, move |result| {
             if let Ok(files) = result {
                 let mut s = draft.borrow_mut();
                 let folders = if excluded {
@@ -1437,9 +1431,31 @@ fn connect_folder_picker(
                     save_folders(&ui, &draft, excluded);
                     fill_folders(&list, &draft, excluded, &ui);
                 }
+            } else if let Err(error) = result
+                && !error.matches(gtk::DialogError::Dismissed)
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.error(&format!("Could not select folders: {error}"));
             }
         });
     });
+}
+
+fn select_folders(
+    parent: &impl IsA<gtk::Window>,
+    excluded: bool,
+    selected: impl FnOnce(Result<gio::ListModel, glib::Error>) + 'static,
+) {
+    gtk::FileDialog::builder()
+        .title(if excluded {
+            "Exclude Folders"
+        } else {
+            "Choose Search Folders"
+        })
+        .accept_label(if excluded { "Exclude" } else { "Add" })
+        .modal(true)
+        .build()
+        .select_multiple_folders(Some(parent), gio::Cancellable::NONE, selected);
 }
 
 fn spawn<T: Send + 'static>(
@@ -1508,6 +1524,129 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    #[ignore = "Needs a private session bus, display, and GTK_USE_PORTAL=1"]
+    fn folder_picker_requests_and_keeps_multiple_directories() -> Result<()> {
+        use glib::variant::ObjectPath;
+        use std::{
+            collections::HashMap,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+                mpsc,
+            },
+        };
+        let root = tempfile::Builder::new()
+            .prefix("gseek-chooser-")
+            .tempdir()?;
+        let chosen: Vec<_> = ["First Folder", "Second Folder"]
+            .map(|name| root.path().join(name))
+            .into();
+        for folder in &chosen {
+            std::fs::create_dir(folder)?;
+        }
+        let uris: Vec<_> = chosen
+            .iter()
+            .map(|path| gio::File::for_path(path).uri().to_string())
+            .collect();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let (ready, started) = mpsc::channel();
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        // Native GTK probes the portal version synchronously. Its service
+        // needs an independent context even while GTK's thread is blocked.
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let context = glib::MainContext::new();
+            context.with_thread_default(|| -> Result<()> {
+        let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
+        let owned = bus.call_sync(
+            Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", "org.freedesktop.DBus",
+            "RequestName", Some(&("org.freedesktop.portal.Desktop", 4u32).to_variant()),
+            None, gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE,
+        )?;
+        assert_eq!(owned.get::<(u32,)>(), Some((1,)), "Run this test in a private dbus-run-session");
+        let info = gio::DBusNodeInfo::for_xml(
+            "<node><interface name='org.freedesktop.portal.FileChooser'><property name='version' type='u' access='read'/><method name='OpenFile'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='a{sv}' direction='in'/><arg type='o' direction='out'/></method></interface></node>",
+        )?;
+        let registration = bus
+            .register_object("/org/freedesktop/portal/desktop", &info.interfaces()[0])
+            .property(|_, _, _, _, _| 3u32.to_variant())
+            .method_call(
+                move |connection, sender, _, _, method, parameters, invocation| {
+                    assert_eq!(method, "OpenFile");
+                    let (_, _, options) = parameters
+                        .get::<(String, String, HashMap<String, glib::Variant>)>()
+                        .unwrap();
+                    assert_eq!(options["directory"].get::<bool>(), Some(true));
+                    assert_eq!(options["multiple"].get::<bool>(), Some(true));
+                    assert_eq!(
+                        options["accept_label"].get::<String>().unwrap(),
+                        if count.fetch_add(1, Ordering::Relaxed) == 0 { "Add" } else { "Exclude" }
+                    );
+                    let sender = sender.unwrap();
+                    let token = options["handle_token"].get::<String>().unwrap();
+                    let handle = format!(
+                        "/org/freedesktop/portal/desktop/request/{}/{token}",
+                        sender.trim_start_matches(':').replace('.', "_")
+                    );
+                    let result = HashMap::from([("uris", uris.to_variant())]);
+                    invocation.return_value(Some(
+                        &(ObjectPath::try_from(handle.as_str()).unwrap(),).to_variant(),
+                    ));
+                    // Confirm after GTK receives the request handle, as a
+                    // user accepting the native dialog would.
+                    let connection = connection.clone();
+                    let sender = sender.to_owned();
+                    let response = (0u32, result).to_variant();
+                    glib::timeout_source_new(Duration::from_millis(50), None, glib::Priority::DEFAULT, move || {
+                        connection
+                            .emit_signal(
+                                Some(&sender),
+                                &handle,
+                                "org.freedesktop.portal.Request",
+                                "Response",
+                                Some(&response),
+                            )
+                            .unwrap();
+                        glib::ControlFlow::Break
+                    }).attach(Some(&glib::MainContext::ref_thread_default()));
+                },
+            )
+            .build()?;
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        let shutdown = main_loop.clone();
+        context.spawn_local(async move {
+            let _ = stopped.recv().await;
+            shutdown.quit();
+        });
+        ready.send(())?;
+        main_loop.run();
+        bus.unregister_object(registration)?;
+        Ok(())
+        })?
+        });
+        started.recv_timeout(Duration::from_secs(5))?;
+        adw::init()?;
+        let parent = gtk::Window::new();
+        parent.present();
+        for excluded in [false, true] {
+            let saved = Rc::new(RefCell::new(None));
+            let result = saved.clone();
+            select_folders(&parent, excluded, move |files| {
+                let mut folders = vec![];
+                add_selected_folders(&mut folders, &files.unwrap());
+                *result.borrow_mut() = Some(folders);
+            });
+            until(|| saved.borrow().is_some());
+            assert_eq!(saved.borrow().as_ref().unwrap(), &chosen);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        parent.close();
+        drop(stop);
+        worker.join().unwrap()?;
+        Ok(())
     }
     fn backend_row(widget: &gtk::Widget) -> Option<adw::ComboRow> {
         if let Some(row) = widget.downcast_ref::<adw::ComboRow>()

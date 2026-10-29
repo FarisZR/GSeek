@@ -512,6 +512,64 @@ class EndToEnd(unittest.TestCase):
             self.command("resume")
             wait_for(lambda: self.status()["ready"])
 
+    def test_06c_linked_batch_exclusions_interrupt_active_indexing(self):
+        first = self.docs / "Linked Exclusion"
+        second = self.docs / "Batch Exclusion"
+        first.mkdir()
+        second.mkdir()
+        alias = ROOT / "Archive Shortcut"
+        alias.symlink_to(first, target_is_directory=True)
+        indexed = first / "Indexed.txt"
+        active = first / "Active.txt"
+        queued = second / "Queued.txt"
+        database = ROOT / "data/gseek/index.sqlite3"
+        def rows():
+            with closing(sqlite3.connect(database)) as db:
+                return db.execute("SELECT uri,state,content FROM files WHERE path IN (?,?,?)",
+                                  tuple(str(path) for path in [indexed, active, queued])).fetchall()
+        previous = json.loads(self.invoke("Settings")[0])["excluded_folders"]
+        try:
+            indexed.write_text("A private collection of carved walnut chess pieces.")
+            self.add(indexed)
+            wait_for(lambda: any(row[0] == indexed.as_uri() and row[1] == "indexed" for row in rows()))
+            content = next(row[2] for row in rows() if row[0] == indexed.as_uri())
+            self.command("pause")
+            active.write_text("Private active archive. The chess pieces are made of walnut.\n" * 20000)
+            queued.write_text("Another private archive waiting in the indexing queue.\n" * 40000)
+            self.add(active)
+            self.add(queued)
+            wait_for(lambda: len(rows()) == 3)
+            self.command("resume")
+            wait_for(lambda: self.status()["current"] == str(active))
+            self.invoke("UpdateSettings", GLib.Variant("(s)", (json.dumps({
+                "excluded_folders": previous + [str(alias), str(second)]
+            }),)))
+            self.assertEqual(rows(), [], "Both selected locations must be removed before the call returns")
+            saved = json.loads(self.invoke("Settings")[0])["excluded_folders"]
+            self.assertIn(str(first), saved, "A linked chooser path must resolve to GNOME's host path")
+            self.assertIn(str(second), saved)
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM chunks WHERE content=?", (content,)).fetchone()[0], 0)
+                pending = db.execute("SELECT count(*) FROM files WHERE state='pending'").fetchone()[0]
+            self.assertEqual(self.status()["counts"]["pending"], pending)
+            self.assertFalse(any(item["path"] in [path.as_uri() for path in [indexed, active, queued]]
+                                 for item in json.loads(self.invoke("Activity")[0])))
+            self.command("scan")
+            wait_for(lambda: self.status()["ready"] and not self.status()["discovering"])
+            self.assertEqual(rows(), [], "Interrupted work and stale discovery must not restore excluded files")
+            self.assertFalse(any(hit["uri"] in [indexed.as_uri(), active.as_uri(), queued.as_uri()]
+                                 for hit in self.search("walnut chess pieces")))
+        finally:
+            for path in [indexed, active, queued]:
+                path.unlink(missing_ok=True)
+                self.remove(path)
+            alias.unlink(missing_ok=True)
+            first.rmdir()
+            second.rmdir()
+            self.invoke("UpdateSettings", GLib.Variant("(s)", (json.dumps({"excluded_folders": previous}),)))
+            self.command("resume")
+            wait_for(lambda: self.status()["ready"])
+
     def test_06b_enabling_images_reconsiders_previously_skipped_files(self):
         settings = json.loads(self.invoke("Settings")[0])
         settings["images"] = False
