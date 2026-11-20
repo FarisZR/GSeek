@@ -120,7 +120,12 @@ fn status(shared: &Shared, state: &str, detail: impl Into<String>) {
 
 pub fn run(paths: Paths) -> Result<()> {
     paths.init()?;
-    let initial = paths.load()?;
+    let mut initial = paths.load()?;
+    let migrated_folders = crate::portals::migrate_folder_paths(&mut initial.folders);
+    let migrated_exclusions = crate::portals::migrate_folder_paths(&mut initial.excluded_folders);
+    if migrated_folders || migrated_exclusions {
+        paths.save(&initial)?;
+    }
     Store::open(&paths.database())?.prune_scope(&initial)?;
     let main_loop = glib::MainLoop::new(None, false);
     let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
@@ -881,7 +886,8 @@ fn index_loop(
                     if discovery::record_from_uri(&file.uri, &settings)?.is_none() {
                         bail!("File moved or is outside the current scope");
                     }
-                    let hash = extract::content_hash(&file.path)?;
+                    let hash = extract::content_hash_cancellable(&file.path, &current_work)?;
+                    current_work.check()?;
                     let runtime = runtime.as_mut().unwrap();
                     let content = format!("{}:{hash}", runtime.fingerprint());
                     if store.cached(&content, &runtime.fingerprint())? {
@@ -898,44 +904,50 @@ fn index_loop(
                         )?;
                     }
                     let mut index = 0;
-                    extract::read(&file, &settings, &paths.cache, |part| {
-                        current_work.check()?;
-                        if shared.lock().unwrap().paused {
-                            bail!("Indexing paused");
-                        }
-                        let latest = paths.load()?;
-                        ensure_current(&store, &file, &latest, &content)?;
-                        if index < completed {
+                    extract::read_cancellable(
+                        &file,
+                        &settings,
+                        &paths.cache,
+                        &current_work,
+                        |part| {
+                            if shared.lock().unwrap().paused {
+                                bail!("Indexing paused");
+                            }
+                            let latest = paths.load()?;
+                            ensure_current(&store, &file, &latest, &content)?;
+                            if index < completed {
+                                index += 1;
+                                return Ok(());
+                            }
+                            let vector = runtime.embed(&part.input)?;
+                            shared.lock().unwrap().backend = runtime.backend.clone();
+                            current_work.check()?;
+                            ensure_current(&store, &file, &paths.load()?, &content)?;
+                            if !store.checkpoint_for(
+                                &file,
+                                &content,
+                                &runtime.fingerprint(),
+                                index,
+                                &StoredChunk {
+                                    text: part.text,
+                                    vector: Some(vector),
+                                    page: part.page,
+                                    seconds: part.seconds,
+                                },
+                            )? {
+                                return Err(IndexingInterruption::Changed.into());
+                            }
                             index += 1;
-                            return Ok(());
-                        }
-                        let vector = runtime.embed(&part.input)?;
-                        shared.lock().unwrap().backend = runtime.backend.clone();
-                        current_work.check()?;
-                        ensure_current(&store, &file, &paths.load()?, &content)?;
-                        if !store.checkpoint_for(
-                            &file,
-                            &content,
-                            &runtime.fingerprint(),
-                            index,
-                            &StoredChunk {
-                                text: part.text,
-                                vector: Some(vector),
-                                page: part.page,
-                                seconds: part.seconds,
-                            },
-                        )? {
-                            return Err(IndexingInterruption::Changed.into());
-                        }
-                        index += 1;
-                        if store
-                            .next_pending()?
-                            .is_some_and(|next| next.uri != file.uri)
-                        {
-                            return Err(IndexingInterruption::Yielded.into());
-                        }
-                        Ok(())
-                    })?;
+                            if store
+                                .next_pending()?
+                                .is_some_and(|next| next.uri != file.uri)
+                            {
+                                return Err(IndexingInterruption::Yielded.into());
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    current_work.check()?;
                     ensure_current(&store, &file, &paths.load()?, &content)?;
                     if index == 0 {
                         bail!("No searchable content was found");

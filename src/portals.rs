@@ -3,13 +3,81 @@ use anyhow::{Context, Result, bail};
 use gio::prelude::*;
 use glib::variant::ToVariant;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    ffi::{CString, OsStr},
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
 const DESKTOP: &str = "org.freedesktop.portal.Desktop";
 const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
 type Options = HashMap<String, glib::Variant>;
+
+pub fn is_document_portal_path(path: &Path) -> bool {
+    path.starts_with(glib::user_runtime_dir().join("doc")) || path.starts_with("/run/flatpak/doc")
+}
+
+pub fn resolve_folder_path(path: PathBuf) -> Result<PathBuf> {
+    let path = if is_document_portal_path(&path) {
+        document_host_path(&path).with_context(|| {
+            format!("Could not find the original location of {}", path.display())
+        })?
+    } else {
+        path
+    };
+    if path.to_str().is_none() {
+        bail!("Folder paths must be valid UTF-8");
+    }
+    Ok(path)
+}
+
+fn document_host_path(path: &Path) -> Result<PathBuf> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // The portal provides this attribute on exports and their descendants.
+    let mut value = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: Both strings are NUL-terminated and the output buffer is writable.
+    let size = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"user.document-portal.host-path".as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let bytes = &value[..size as usize];
+    let path = PathBuf::from(OsStr::from_bytes(bytes));
+    if bytes.contains(&0)
+        || !path.is_absolute()
+        || path == Path::new("/")
+        || path.components().any(|c| c == Component::ParentDir)
+        || is_document_portal_path(&path)
+    {
+        bail!("The document portal returned an invalid host path");
+    }
+    Ok(path)
+}
+
+/// Recover saved aliases where the original export is still available.
+pub fn migrate_folder_paths(folders: &mut Vec<PathBuf>) -> bool {
+    let mut changed = false;
+    for path in folders.iter_mut() {
+        if is_document_portal_path(path)
+            && let Ok(host) = resolve_folder_path(path.clone())
+        {
+            *path = host;
+            changed = true;
+        }
+    }
+    if changed {
+        let mut seen = HashSet::new();
+        folders.retain(|path| seen.insert(path.clone()));
+    }
+    changed
+}
 
 pub fn open_search_settings() -> Result<()> {
     let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
@@ -141,6 +209,40 @@ fn watch_update_marker(
 mod tests {
     use super::*;
     use glib::variant::ObjectPath;
+
+    #[test]
+    fn document_host_path_reads_the_exact_folder_location() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let alias = root.path().join("exported folder");
+        std::fs::create_dir(&alias)?;
+        assert!(document_host_path(&alias).is_err());
+
+        let filename = CString::new(alias.as_os_str().as_bytes())?;
+        let set_host_path = |value: &[u8]| -> Result<()> {
+            // SAFETY: The filename and attribute name are NUL-terminated, and
+            // the value is readable for the specified length.
+            let status = unsafe {
+                libc::setxattr(
+                    filename.as_ptr(),
+                    c"user.document-portal.host-path".as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                )
+            };
+            if status < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok(())
+        };
+        let host = Path::new("/home/test/Documents/Parent/Private ü");
+        set_host_path(host.as_os_str().as_bytes())?;
+        assert_eq!(document_host_path(&alias)?, host);
+        set_host_path(b"/home/test/Documents/../Pictures")?;
+        assert!(document_host_path(&alias).is_err());
+        Ok(())
+    }
+
     #[test]
     fn installed_deployment_marker_triggers_one_restart() -> Result<()> {
         let root = tempfile::tempdir()?;

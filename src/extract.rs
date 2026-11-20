@@ -1,4 +1,4 @@
-use crate::{config::Settings, store::FileRecord};
+use crate::{cancellation::Cancellation, config::Settings, store::FileRecord};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,10 +40,16 @@ pub struct Part {
 }
 
 pub fn content_hash(path: &Path) -> Result<String> {
+    content_hash_cancellable(path, &Cancellation::default())
+}
+
+pub(crate) fn content_hash_cancellable(path: &Path, cancellation: &Cancellation) -> Result<String> {
+    cancellation.check()?;
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
+        cancellation.check()?;
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -152,8 +158,19 @@ pub fn read(
     file: &FileRecord,
     settings: &Settings,
     cache: &Path,
+    consume: impl FnMut(Part) -> Result<()>,
+) -> Result<()> {
+    read_cancellable(file, settings, cache, &Cancellation::default(), consume)
+}
+
+pub(crate) fn read_cancellable(
+    file: &FileRecord,
+    settings: &Settings,
+    cache: &Path,
+    cancellation: &Cancellation,
     mut consume: impl FnMut(Part) -> Result<()>,
 ) -> Result<()> {
+    cancellation.check()?;
     if file.size > settings.max_file_mb * 1024 * 1024 {
         bail!(
             "File exceeds the configured {} MB limit",
@@ -167,6 +184,10 @@ pub fn read(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+    let mut consume = |part| {
+        cancellation.check()?;
+        consume(part)
+    };
     let mut text = |text: String, page: Option<u32>| -> Result<()> {
         for chunk in text_parts(&text) {
             consume(Part {
@@ -224,15 +245,21 @@ pub fn read(
         } else {
             "content.xml"
         };
-        let xml = run_output(
+        let xml = run_output_cancellable(
             Command::new(tool("unzip")).arg("-p").arg(p).arg(member),
             temp.path(),
             MAX_TEXT_BYTES,
+            cancellation,
         )?;
         return text(strip_xml(&String::from_utf8_lossy(&xml)), None);
     }
     if ext == "pdf" || file.mime == "application/pdf" {
-        let info = run_output(Command::new(tool("pdfinfo")).arg(p), temp.path(), 64 * 1024)?;
+        let info = run_output_cancellable(
+            Command::new(tool("pdfinfo")).arg(p),
+            temp.path(),
+            64 * 1024,
+            cancellation,
+        )?;
         let pages = String::from_utf8_lossy(&info)
             .lines()
             .find_map(|s| {
@@ -248,13 +275,14 @@ pub fn read(
         let mut found_text = false;
         for page in 1..=pages {
             let index = page.to_string();
-            let words = run_output(
+            let words = run_output_cancellable(
                 Command::new(tool("pdftotext"))
                     .args(["-f", &index, "-l", &index, "-enc", "UTF-8"])
                     .arg(p)
                     .arg("-"),
                 temp.path(),
                 MAX_TEXT_BYTES,
+                cancellation,
             )?;
             let words = String::from_utf8_lossy(&words).into_owned();
             for chunk in text_parts(&words) {
@@ -270,7 +298,7 @@ pub fn read(
                 continue;
             }
             let image = temp.path().join("page.png");
-            run_output(
+            run_output_cancellable(
                 Command::new(tool("pdftoppm"))
                     .args([
                         "-f",
@@ -286,6 +314,7 @@ pub fn read(
                     .arg(temp.path().join("page")),
                 temp.path(),
                 64 * 1024,
+                cancellation,
             )?;
             consume(Part {
                 input: Input::Image {
@@ -307,7 +336,7 @@ pub fn read(
             bail!("Image indexing is disabled");
         }
         let image = temp.path().join("image.png");
-        ffmpeg_image(p, &image, None, temp.path())?;
+        ffmpeg_image(p, &image, None, temp.path(), cancellation)?;
         return consume(Part {
             input: Input::Image { path: image },
             text: String::new(),
@@ -319,7 +348,7 @@ pub fn read(
         if !settings.audio_video {
             bail!("Audio and video indexing is disabled");
         }
-        let info = run_output(
+        let info = run_output_cancellable(
             media_command("ffprobe")
                 .args([
                     "-v",
@@ -332,6 +361,7 @@ pub fn read(
                 .arg(p),
             temp.path(),
             1024 * 1024,
+            cancellation,
         )?;
         let info: serde_json::Value = serde_json::from_slice(&info)?;
         let duration = info["format"]["duration"]
@@ -347,7 +377,7 @@ pub fn read(
         if audio {
             for start in (0..duration.ceil() as u64).step_by(25) {
                 let output = temp.path().join("window.wav");
-                run_output(
+                run_output_cancellable(
                     media_command("ffmpeg")
                         .args([
                             "-nostdin",
@@ -373,6 +403,7 @@ pub fn read(
                         .arg(&output),
                     temp.path(),
                     64 * 1024,
+                    cancellation,
                 )?;
                 consume(Part {
                     input: Input::Audio {
@@ -388,7 +419,7 @@ pub fn read(
         if video {
             for start in (0..duration.ceil() as u64).step_by(10) {
                 let image = temp.path().join("frame.png");
-                ffmpeg_image(p, &image, Some(start), temp.path())?;
+                ffmpeg_image(p, &image, Some(start), temp.path(), cancellation)?;
                 consume(Part {
                     input: Input::Image {
                         path: image.clone(),
@@ -405,7 +436,13 @@ pub fn read(
     bail!("No content reader for {}", file.mime)
 }
 
-fn ffmpeg_image(input: &Path, output: &Path, seconds: Option<u64>, temp: &Path) -> Result<()> {
+fn ffmpeg_image(
+    input: &Path,
+    output: &Path,
+    seconds: Option<u64>,
+    temp: &Path,
+    cancellation: &Cancellation,
+) -> Result<()> {
     let mut cmd = media_command("ffmpeg");
     cmd.args(["-nostdin", "-v", "error", "-y"]);
     if let Some(s) = seconds {
@@ -422,7 +459,7 @@ fn ffmpeg_image(input: &Path, output: &Path, seconds: Option<u64>, temp: &Path) 
             "1",
         ])
         .arg(output);
-    run_output(&mut cmd, temp, 64 * 1024)?;
+    run_output_cancellable(&mut cmd, temp, 64 * 1024, cancellation)?;
     Ok(())
 }
 
@@ -490,7 +527,17 @@ fn reader_help(program: &std::ffi::OsStr) -> String {
 }
 
 pub fn run_output(command: &mut Command, temp: &Path, limit: u64) -> Result<Vec<u8>> {
+    run_output_cancellable(command, temp, limit, &Cancellation::default())
+}
+
+fn run_output_cancellable(
+    command: &mut Command,
+    temp: &Path,
+    limit: u64,
+    cancellation: &Cancellation,
+) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt;
+    cancellation.check()?;
     let output = tempfile::tempfile_in(temp)?;
     let error = tempfile::tempfile_in(temp)?;
     command
@@ -518,15 +565,18 @@ pub fn run_output(command: &mut Command, temp: &Path, limit: u64) -> Result<Vec<
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        let interrupted = cancellation.check();
+        if interrupted.is_err() || Instant::now() >= deadline {
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
             let _ = child.wait();
+            interrupted?;
             bail!("Content reader timed out after 60 seconds");
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    cancellation.check()?;
     use std::io::{Seek, SeekFrom};
     let mut output = output;
     output.seek(SeekFrom::Start(0))?;
@@ -626,6 +676,37 @@ mod tests {
         assert_ne!(content_hash(&a)?, content_hash(&b)?);
         Ok(())
     }
+
+    #[test]
+    fn settings_change_stops_a_running_reader() -> Result<()> {
+        use crate::cancellation::{Cancelled, WorkControl};
+
+        let root = tempfile::tempdir()?;
+        let started = root.path().join("started");
+        let work = WorkControl::default();
+        let cancellation = work.token();
+        std::thread::scope(|scope| -> Result<()> {
+            let reader = scope.spawn(|| {
+                run_output_cancellable(
+                    Command::new("sh")
+                        .args(["-c", "touch \"$1\" && exec sleep 60", "sh"])
+                        .arg(&started),
+                    root.path(),
+                    1024,
+                    &cancellation,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !started.exists() && !reader.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            work.interrupt();
+            assert!(started.exists(), "Reader never started");
+            assert!(reader.join().unwrap().unwrap_err().is::<Cancelled>());
+            work.token().check()
+        })
+    }
+
     #[test]
     fn xml_documents_preserve_words_and_entities() {
         assert_eq!(

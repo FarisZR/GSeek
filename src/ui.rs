@@ -1,14 +1,15 @@
 use crate::{
     APP_ID,
     config::{Backend, External, Paths, Settings},
-    integration, service,
+    integration, portals, service,
 };
 use adw::prelude::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glib::variant::ToVariant;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
@@ -41,16 +42,24 @@ struct Window {
     paths: Paths,
 }
 
-struct SettingsWrite {
-    method: &'static str,
-    value: serde_json::Value,
-    complete: Option<Box<dyn FnOnce(bool)>>,
-}
-
 type SettingsLoaded = Box<dyn FnOnce(&Rc<Window>, Settings)>;
 enum SettingsRequest {
-    Write(SettingsWrite),
+    Write(serde_json::Value),
+    Configure(gtk::Button),
+    EditFolders(FolderEdit),
     Read(SettingsLoaded),
+}
+
+struct FolderEdit {
+    draft: Rc<RefCell<Settings>>,
+    list: gtk::ListBox,
+    excluded: bool,
+    change: FolderChange,
+}
+
+enum FolderChange {
+    Add(Vec<PathBuf>),
+    Remove(PathBuf),
 }
 
 struct BackendView {
@@ -784,37 +793,8 @@ impl Window {
         }
     }
 
-    fn apply_settings(self: &Rc<Self>, settings: Settings, button: &gtk::Button) {
-        if settings.folders.is_empty() {
-            self.error("Choose at least one search folder.");
-            return;
-        }
-        if let Err(error) = settings.validate() {
-            self.error(&format!("{error:#}"));
-            return;
-        }
-        button.set_sensitive(false);
-        let weak = Rc::downgrade(self);
-        let button = button.clone();
-        self.queue_settings(SettingsRequest::Write(SettingsWrite {
-            method: "Configure",
-            value: serde_json::to_value(settings).unwrap(),
-            complete: Some(Box::new(move |saved| {
-                button.set_sensitive(true);
-                if saved && let Some(ui) = weak.upgrade() {
-                    ui.main_stack.set_visible_child_name("library");
-                    ui.refresh();
-                }
-            })),
-        }));
-    }
-
     fn save_preference(self: &Rc<Self>, patch: serde_json::Value) {
-        self.queue_settings(SettingsRequest::Write(SettingsWrite {
-            method: "UpdateSettings",
-            value: patch,
-            complete: None,
-        }));
+        self.queue_settings(SettingsRequest::Write(patch));
     }
     fn with_settings(self: &Rc<Self>, complete: impl FnOnce(&Rc<Self>, Settings) + 'static) {
         // Read through the same queue as writes: reopening a page can never
@@ -837,8 +817,28 @@ impl Window {
             return;
         };
         self.settings_busy.set(true);
-        let request = match request {
-            SettingsRequest::Write(request) => request,
+        match request {
+            SettingsRequest::Write(patch) => {
+                self.write_settings(move || call_settings("UpdateSettings", patch), |_, _| {});
+            }
+            SettingsRequest::Configure(button) => self.write_settings(
+                || {
+                    let settings = service::read_settings()?;
+                    anyhow::ensure!(
+                        !settings.folders.is_empty(),
+                        "Choose at least one search folder."
+                    );
+                    portals::request_background()?;
+                    call_settings("Configure", serde_json::to_value(settings)?)
+                },
+                move |ui, saved| {
+                    button.set_sensitive(true);
+                    if saved.is_some() {
+                        ui.main_stack.set_visible_child_name("library");
+                    }
+                },
+            ),
+            SettingsRequest::EditFolders(edit) => self.edit_folders(edit),
             SettingsRequest::Read(complete) => {
                 let weak = Rc::downgrade(self);
                 spawn(service::read_settings, move |result| {
@@ -853,40 +853,74 @@ impl Window {
                         ui.process_settings();
                     }
                 });
-                return;
             }
-        };
+        }
+    }
+    fn write_settings<T: Send + 'static>(
+        self: &Rc<Self>,
+        write: impl FnOnce() -> Result<T> + Send + 'static,
+        complete: impl FnOnce(&Rc<Self>, Option<T>) + 'static,
+    ) {
         let weak = Rc::downgrade(self);
-        let method = request.method;
-        let value = request.value;
-        spawn(
+        spawn(write, move |result| {
+            let Some(ui) = weak.upgrade() else { return };
+            let saved = result.is_ok();
+            let value = match result {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    ui.error(&format!("Could not save preference\n{error:#}"));
+                    None
+                }
+            };
+            complete(&ui, value);
+            if saved && ui.main_stack.visible_child_name().as_deref() == Some("results") {
+                ui.search_refresh_pending.set(true);
+                ui.search_generation
+                    .set(ui.search_generation.get().wrapping_add(1));
+                ui.search_results.remove_all();
+                ui.search_content.set_visible_child_name("empty");
+                ui.search_placeholder.set_title("Updating Search");
+                ui.search_placeholder
+                    .set_description(Some("Applying preferences"));
+            }
+            ui.settings_busy.set(false);
+            ui.refresh();
+            ui.process_settings();
+        });
+    }
+
+    fn edit_folders(self: &Rc<Self>, edit: FolderEdit) {
+        let FolderEdit {
+            draft,
+            list,
+            excluded,
+            change,
+        } = edit;
+        self.write_settings(
             move || {
-                if method == "Configure" {
-                    crate::portals::request_background()?;
-                }
-                service::call(method, Some(&(value.to_string(),).to_variant()))?;
-                Ok(())
-            },
-            move |result| {
-                if let Some(complete) = request.complete {
-                    complete(result.is_ok());
-                }
-                if let Some(ui) = weak.upgrade() {
-                    ui.settings_busy.set(false);
-                    if let Err(error) = result {
-                        ui.error(&format!("Could not save preference: {error:#}"));
-                    } else if ui.main_stack.visible_child_name().as_deref() == Some("results") {
-                        ui.search_refresh_pending.set(true);
-                        ui.search_generation
-                            .set(ui.search_generation.get().wrapping_add(1));
-                        ui.search_results.remove_all();
-                        ui.search_content.set_visible_child_name("empty");
-                        ui.search_placeholder.set_title("Updating Search");
-                        ui.search_placeholder
-                            .set_description(Some("Applying preferences"));
+                let mut settings = service::read_settings()?;
+                let (key, folders) = settings_folders(&mut settings, excluded);
+                let previous = folders.clone();
+                match change {
+                    FolderChange::Add(paths) => {
+                        let paths = paths
+                            .into_iter()
+                            .map(portals::resolve_folder_path)
+                            .collect::<Result<Vec<_>>>()
+                            .context("Choose folders from their original locations")?;
+                        add_selected_folders(folders, paths);
                     }
-                    ui.refresh();
-                    ui.process_settings();
+                    FolderChange::Remove(path) => folders.retain(|entry| entry != &path),
+                }
+                if *folders != previous {
+                    call_settings("UpdateSettings", serde_json::json!({(key): folders}))?;
+                }
+                Ok(std::mem::take(folders))
+            },
+            move |ui, folders| {
+                if let Some(folders) = folders {
+                    *settings_folders(&mut draft.borrow_mut(), excluded).1 = folders;
+                    fill_folders(&list, &draft, excluded, ui);
                 }
             },
         );
@@ -962,10 +996,10 @@ impl Window {
         toolbar.add_bottom_bar(&footer_clamp);
         self.main_stack.add_named(&toolbar, Some("setup"));
         let weak = Rc::downgrade(self);
-        let settings = draft.clone();
         start.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
-                ui.apply_settings(settings.borrow().clone(), button);
+                button.set_sensitive(false);
+                ui.queue_settings(SettingsRequest::Configure(button.clone()));
             }
         });
         let weak = Rc::downgrade(self);
@@ -1254,20 +1288,20 @@ fn connect_switch(row: &adw::SwitchRow, key: &'static str, ui: &Rc<Window>) {
         }
     });
 }
-fn save_folders(ui: &Rc<Window>, draft: &Rc<RefCell<Settings>>, excluded: bool) {
-    let settings = draft.borrow();
-    let (key, folders) = if excluded {
-        ("excluded_folders", &settings.excluded_folders)
-    } else {
-        ("folders", &settings.folders)
-    };
-    ui.save_preference(serde_json::json!({(key): folders}));
+fn call_settings(method: &str, value: serde_json::Value) -> Result<()> {
+    service::call(method, Some(&(value.to_string(),).to_variant()))?;
+    Ok(())
 }
-fn add_selected_folders(folders: &mut Vec<std::path::PathBuf>, selected: &gio::ListModel) {
-    for file in selected.iter::<gio::File>().flatten() {
-        if let Some(path) = file.path()
-            && !folders.contains(&path)
-        {
+fn settings_folders(settings: &mut Settings, excluded: bool) -> (&'static str, &mut Vec<PathBuf>) {
+    if excluded {
+        ("excluded_folders", &mut settings.excluded_folders)
+    } else {
+        ("folders", &mut settings.folders)
+    }
+}
+fn add_selected_folders(folders: &mut Vec<PathBuf>, selected: Vec<PathBuf>) {
+    for path in selected {
+        if !folders.contains(&path) {
             folders.push(path);
         }
     }
@@ -1356,7 +1390,13 @@ fn fill_folders(
         row.set_tooltip_text(Some(&path.to_string_lossy()));
         row.set_title_lines(1);
         row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
-        if !excluded && draft.borrow().configured {
+        if portals::is_document_portal_path(&path) {
+            row.set_subtitle(if excluded {
+                "Choose this folder again to exclude it."
+            } else {
+                "Choose this folder again to include it."
+            });
+        } else if !excluded && draft.borrow().configured {
             let reindex = gtk::Button::builder()
                 .icon_name("view-refresh-symbolic")
                 .tooltip_text("Reindex This Location")
@@ -1383,17 +1423,13 @@ fn fill_folders(
         let refresh_list = list.clone();
         let weak = Rc::downgrade(ui);
         remove.connect_clicked(move |_| {
-            let mut s = draft.borrow_mut();
-            let folders = if excluded {
-                &mut s.excluded_folders
-            } else {
-                &mut s.folders
-            };
-            folders.retain(|p| p != &path);
-            drop(s);
             if let Some(ui) = weak.upgrade() {
-                save_folders(&ui, &draft, excluded);
-                fill_folders(&refresh_list, &draft, excluded, &ui);
+                ui.queue_settings(SettingsRequest::EditFolders(FolderEdit {
+                    draft: draft.clone(),
+                    list: refresh_list.clone(),
+                    excluded,
+                    change: FolderChange::Remove(path.clone()),
+                }));
             }
         });
         list.append(&row);
@@ -1424,19 +1460,18 @@ fn connect_folder_picker(
         let draft = draft.clone();
         let weak = weak.clone();
         picker.select_multiple_folders(Some(&parent), gio::Cancellable::NONE, move |result| {
-            if let Ok(files) = result {
-                let mut s = draft.borrow_mut();
-                let folders = if excluded {
-                    &mut s.excluded_folders
-                } else {
-                    &mut s.folders
-                };
-                add_selected_folders(folders, &files);
-                drop(s);
-                if let Some(ui) = weak.upgrade() {
-                    save_folders(&ui, &draft, excluded);
-                    fill_folders(&list, &draft, excluded, &ui);
-                }
+            if let (Ok(files), Some(ui)) = (result, weak.upgrade()) {
+                let paths = files
+                    .iter::<gio::File>()
+                    .flatten()
+                    .filter_map(|file| file.path())
+                    .collect();
+                ui.queue_settings(SettingsRequest::EditFolders(FolderEdit {
+                    draft,
+                    list,
+                    excluded,
+                    change: FolderChange::Add(paths),
+                }));
             }
         });
     });
@@ -1493,13 +1528,13 @@ mod tests {
 
     #[test]
     fn folder_selection_adds_the_whole_batch_without_duplicates() {
-        let selected = gio::ListStore::new::<gio::File>();
-        selected.append(&gio::File::for_path("/home/test/Documents"));
-        selected.append(&gio::File::for_path("/home/test/Pictures"));
-        selected.append(&gio::File::for_path("/home/test/Documents"));
-        selected.append(&gio::File::for_uri("https://example.com/nonlocal"));
+        let selected = vec![
+            PathBuf::from("/home/test/Documents"),
+            PathBuf::from("/home/test/Pictures"),
+            PathBuf::from("/home/test/Documents"),
+        ];
         for mut folders in [vec![], vec![PathBuf::from("/home/test/Documents")]] {
-            add_selected_folders(&mut folders, selected.upcast_ref());
+            add_selected_folders(&mut folders, selected.clone());
             assert_eq!(
                 folders,
                 vec![
@@ -1509,6 +1544,58 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[ignore = "Needs a display and an isolated GSeek service on the session bus"]
+    fn folder_edits_finish_before_reads_and_allow_retry() {
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("com.fariszr.gseek.FolderEditTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let ui = Window::build(&app, Paths::from_env());
+        ui.window.present();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("Private");
+        let second = root.path().join("Archive");
+        let initial = service::read_settings().unwrap();
+        let draft = Rc::new(RefCell::new(initial.clone()));
+        let list = gtk::ListBox::new();
+        let edit = |change| {
+            ui.queue_settings(SettingsRequest::EditFolders(FolderEdit {
+                draft: draft.clone(),
+                list: list.clone(),
+                excluded: true,
+                change,
+            }));
+        };
+
+        edit(FolderChange::Add(vec![first.clone()]));
+        assert!(ui.settings_hold.borrow().is_some());
+        let expected = first.clone();
+        ui.with_settings(move |_, reopened| assert!(reopened.excluded_folders.contains(&expected)));
+        until(|| !ui.settings_busy.get());
+        assert!(ui.settings_hold.borrow().is_none());
+
+        // A failed batch must leave the displayed and persisted folders in sync.
+        edit(FolderChange::Add(vec![second.clone(), PathBuf::from("/")]));
+        until(|| !ui.settings_busy.get());
+        assert!(ui.settings_hold.borrow().is_none());
+        assert!(!draft.borrow().excluded_folders.contains(&second));
+        close_dialog(&ui.window);
+
+        edit(FolderChange::Add(vec![second.clone()]));
+        edit(FolderChange::Remove(first.clone()));
+        ui.with_settings(move |_, reopened| {
+            assert!(!reopened.excluded_folders.contains(&first));
+            assert!(reopened.excluded_folders.contains(&second));
+        });
+        until(|| !ui.settings_busy.get());
+        ui.save_preference(serde_json::json!({"excluded_folders": initial.excluded_folders}));
+        until(|| !ui.settings_busy.get());
+    }
+
     fn backend_row(widget: &gtk::Widget) -> Option<adw::ComboRow> {
         if let Some(row) = widget.downcast_ref::<adw::ComboRow>()
             && row.title() == "Compute Backend"
