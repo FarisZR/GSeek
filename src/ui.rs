@@ -1,7 +1,7 @@
 use crate::{
     APP_ID,
     config::{Backend, External, Paths, Settings},
-    integration, service,
+    integration, portals, service,
 };
 use adw::prelude::*;
 use anyhow::Result;
@@ -9,6 +9,7 @@ use glib::variant::ToVariant;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
@@ -1263,11 +1264,9 @@ fn save_folders(ui: &Rc<Window>, draft: &Rc<RefCell<Settings>>, excluded: bool) 
     };
     ui.save_preference(serde_json::json!({(key): folders}));
 }
-fn add_selected_folders(folders: &mut Vec<std::path::PathBuf>, selected: &gio::ListModel) {
-    for file in selected.iter::<gio::File>().flatten() {
-        if let Some(path) = file.path()
-            && !folders.contains(&path)
-        {
+fn add_selected_folders(folders: &mut Vec<PathBuf>, selected: Vec<PathBuf>) {
+    for path in selected {
+        if !folders.contains(&path) {
             folders.push(path);
         }
     }
@@ -1356,7 +1355,13 @@ fn fill_folders(
         row.set_tooltip_text(Some(&path.to_string_lossy()));
         row.set_title_lines(1);
         row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
-        if !excluded && draft.borrow().configured {
+        if portals::is_document_portal_path(&path) {
+            row.set_subtitle(if excluded {
+                "Choose this folder again to exclude it."
+            } else {
+                "Choose this folder again to include it."
+            });
+        } else if !excluded && draft.borrow().configured {
             let reindex = gtk::Button::builder()
                 .icon_name("view-refresh-symbolic")
                 .tooltip_text("Reindex This Location")
@@ -1425,18 +1430,44 @@ fn connect_folder_picker(
         let weak = weak.clone();
         picker.select_multiple_folders(Some(&parent), gio::Cancellable::NONE, move |result| {
             if let Ok(files) = result {
-                let mut s = draft.borrow_mut();
-                let folders = if excluded {
-                    &mut s.excluded_folders
-                } else {
-                    &mut s.folders
-                };
-                add_selected_folders(folders, &files);
-                drop(s);
-                if let Some(ui) = weak.upgrade() {
-                    save_folders(&ui, &draft, excluded);
-                    fill_folders(&list, &draft, excluded, &ui);
-                }
+                let paths: Vec<_> = files
+                    .iter::<gio::File>()
+                    .flatten()
+                    .filter_map(|file| file.path())
+                    .collect();
+                spawn(
+                    move || {
+                        paths
+                            .into_iter()
+                            .map(portals::resolve_folder_path)
+                            .collect()
+                    },
+                    move |result| {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let paths = match result {
+                            Ok(paths) => paths,
+                            Err(error) => {
+                                ui.error(&format!(
+                                    "{error}. Choose folders from their original locations."
+                                ));
+                                return;
+                            }
+                        };
+                        let mut s = draft.borrow_mut();
+                        let folders = if excluded {
+                            &mut s.excluded_folders
+                        } else {
+                            &mut s.folders
+                        };
+                        let count = folders.len();
+                        add_selected_folders(folders, paths);
+                        if folders.len() != count {
+                            drop(s);
+                            save_folders(&ui, &draft, excluded);
+                            fill_folders(&list, &draft, excluded, &ui);
+                        }
+                    },
+                );
             }
         });
     });
@@ -1493,13 +1524,13 @@ mod tests {
 
     #[test]
     fn folder_selection_adds_the_whole_batch_without_duplicates() {
-        let selected = gio::ListStore::new::<gio::File>();
-        selected.append(&gio::File::for_path("/home/test/Documents"));
-        selected.append(&gio::File::for_path("/home/test/Pictures"));
-        selected.append(&gio::File::for_path("/home/test/Documents"));
-        selected.append(&gio::File::for_uri("https://example.com/nonlocal"));
+        let selected = vec![
+            PathBuf::from("/home/test/Documents"),
+            PathBuf::from("/home/test/Pictures"),
+            PathBuf::from("/home/test/Documents"),
+        ];
         for mut folders in [vec![], vec![PathBuf::from("/home/test/Documents")]] {
-            add_selected_folders(&mut folders, selected.upcast_ref());
+            add_selected_folders(&mut folders, selected.clone());
             assert_eq!(
                 folders,
                 vec![
