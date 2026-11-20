@@ -17,6 +17,12 @@
   <content_rating type="oars-1.1"/>
   <screenshots><screenshot type="default"><caption>GSeek setup</caption><image>https://raw.githubusercontent.com/FarisZR/GSeek/main/docs/screenshots/welcome.png</image></screenshot></screenshots>
   <releases>
+    <release version="0.2.5" date="2026-11-20">
+      <description>
+        <p>Folder exclusions now use the original paths of folders selected in the Flatpak file picker. GSeek repairs existing exclusions when it can recover their paths.</p>
+        <p>New exclusions take effect during indexing. GSeek removes matching files from the index and queue, stops local processing of excluded files, and continues with eligible files.</p>
+      </description>
+    </release>
     <release version="0.2.4" date="2026-11-20">
       <description>
         <p>When you search for a file by name, the copy you edited or opened most recently now comes first, as in GNOME Files. Document text and meaning still help find files, but no longer push an older indexed copy above a newer download.</p>
