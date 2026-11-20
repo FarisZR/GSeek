@@ -782,9 +782,12 @@ impl Store {
         // Preserve lexical hits, but omit weak semantic neighbours rather than filling the view.
         let cutoff = (best_semantic - 0.12).max(0.60);
         // Files whose names match the query equally well share their strongest
-        // text and embedding evidence. Content then places the bucket among
-        // content-only results, while GNOME's recency/rank orders files inside
-        // it: an indexed old copy must not outrank the copy edited yesterday.
+        // text evidence, so GNOME's recency/rank orders files inside a bucket:
+        // an indexed old copy must not outrank the copy edited yesterday.
+        // Embeddings lift every named file by the same amount (the strongest
+        // lift of any bucket). That places name matches among content-only
+        // results without changing their order relative to each other, which
+        // is therefore identical with or without a query embedding.
         let mut buckets = HashMap::<u8, (f64, Option<f64>)>::new();
         for (uri, hit) in &hits {
             let name = crate::ranking::filename(query.text, &hit.name, &hit.path);
@@ -801,6 +804,14 @@ impl Store {
                 };
             }
         }
+        let lift = buckets
+            .iter()
+            .map(|(key, (text, cosine))| {
+                let base = crate::ranking::bucket_base(*key);
+                let lexical = crate::ranking::lexical(base, *text);
+                crate::ranking::combined(lexical, *cosine) - lexical
+            })
+            .fold(0.0_f64, f64::max);
         for (uri, hit) in &mut hits {
             let name = crate::ranking::filename(query.text, &hit.name, &hit.path);
             let lexical = hit.score;
@@ -813,8 +824,8 @@ impl Store {
             }
             hit.score = match crate::ranking::name_bucket(name) {
                 Some((key, base)) => {
-                    let (text, cosine) = buckets[&key];
-                    crate::ranking::combined(crate::ranking::lexical(base, text), cosine)
+                    crate::ranking::lexical(base, buckets[&key].0)
+                        + lift
                         + crate::ranking::word_quality(name)
                 }
                 None => crate::ranking::combined(lexical, cosine),
@@ -1150,17 +1161,59 @@ mod tests {
                 "{names:?}"
             );
             // Whole-word bucket: recency, not the indexed copy's embedding.
-            let renewed_at = names.iter().position(|n| *n == "Passport 2025 renewed.pdf");
-            let scan_at = names
-                .iter()
-                .position(|n| *n == "Passport 2025 scan old.pdf");
-            assert!(renewed_at < scan_at, "{names:?}");
+            let position = |wanted: &str| {
+                names
+                    .iter()
+                    .position(|n| *n == wanted)
+                    .unwrap_or_else(|| panic!("{wanted} missing: {names:?}"))
+            };
+            assert!(
+                position("Passport 2025 renewed.pdf") < position("Passport 2025 scan old.pdf"),
+                "{names:?}"
+            );
         }
         // Recently opened beats recently modified evidence of an older copy.
         original.search.accessed = at;
         let files = [original.clone(), scan, latest, renewed];
         let hits = store.search(query("passport 2025", &vector, "p"), &settings, &files, 20)?;
         assert_eq!(hits[0].uri, original.uri);
+        Ok(())
+    }
+
+    #[test]
+    fn embeddings_do_not_reorder_filename_buckets() -> Result<()> {
+        let (dir, mut store, settings, template) = fixture()?;
+        let mut whole = ranked_file(dir.path(), &mut store, &template, "Tax archive.pdf", vec![])?;
+        let mut page = chunk(1.0, 1);
+        page.text = "tax".into();
+        let mut prefix = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Taxation.pdf",
+            vec![page],
+        )?;
+        let content = ranked_file(
+            dir.path(),
+            &mut store,
+            &template,
+            "Receipts.pdf",
+            vec![chunk(0.95, 1)],
+        )?;
+        let at = now();
+        for file in [&mut whole, &mut prefix] {
+            file.search.modified = at - 86400;
+            file.search.fts_rank = 1.0;
+        }
+        let files = [whole.clone(), prefix.clone()];
+        let vector = query_vector();
+        let lexical = store.search(query("tax", &[], ""), &settings, &files, 20)?;
+        let semantic = store.search(query("tax", &vector, "p"), &settings, &files, 20)?;
+        let uris = |hits: &[SearchHit]| hits.iter().map(|h| h.uri.clone()).collect::<Vec<_>>();
+        assert_eq!(uris(&lexical), [whole.uri.clone(), prefix.uri.clone()]);
+        // The content-only result joins after both name matches, which the
+        // strongest named embedding lifted together.
+        assert_eq!(uris(&semantic), [whole.uri, prefix.uri, content.uri]);
         Ok(())
     }
 

@@ -66,12 +66,20 @@ pub(crate) fn context(query: &str, name: &str, metadata: &SearchMetadata, now: i
     // Secondary to the hard exact-name/title bands (3 / 2). Ordinary matches
     // are soft evidence: like GNOME global search, recency may outweigh a small
     // prefix/word-quality difference. Do not shrink recency into a tie-break.
+    //
+    // GNOME's recency bands are at least 0.01 apart. Everything after them
+    // (filename position ≤ 0.004 spread, LocalSearch rank ≤ 0.001, `fresher`
+    // < 0.001 and `word_quality` ≤ 0.003) sums below one band, so a file in a
+    // newer band always beats an older one with the same name evidence.
     let fts = if metadata.fts_rank.is_finite() {
         metadata.fts_rank.clamp(0.0, 50.0)
     } else {
         0.0
     };
-    0.001 * (name_match(query, name) + fts + recency(metadata, now)) + fresher(metadata, now)
+    0.001 * recency(metadata, now)
+        + 0.0001 * name_match(query, name)
+        + 0.00002 * fts
+        + fresher(metadata, now)
 }
 
 /// Inside one GNOME recency band, the newer copy should still win. This stays
@@ -114,9 +122,13 @@ fn without_copy_marker(stem: &str) -> &str {
             stem = base.trim_end();
         }
         // " - Copy", " copy", " copy 2"
-        let unnumbered = stem
-            .trim_end_matches(|c: char| c.is_ascii_digit())
-            .trim_end();
+        let digits = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+        // "copy 2", but a year such as "copy 2024" is part of the title.
+        let unnumbered = if stem.len() - digits.len() <= 3 {
+            digits.trim_end()
+        } else {
+            stem
+        };
         for candidate in [stem, unnumbered] {
             if let Some(base) = candidate.strip_suffix("copy")
                 && base.ends_with(separators)
@@ -186,24 +198,34 @@ pub(crate) fn filename(query: &str, name: &str, path: &Path) -> f64 {
 /// Lexicographic name buckets, as in Meilisearch's bucket sort or Typesense's
 /// text-match buckets. Files in one bucket match the typed name equally well, so
 /// only GNOME's metadata (recency, LocalSearch rank, match position) orders them.
-/// Document text and embeddings move the whole bucket relative to content-only
-/// results; they never choose which copy of a known file comes first, because
-/// that evidence exists only for copies GSeek has already indexed.
+/// Document text and embeddings lift all named files together relative to
+/// content-only results; they never choose which copy of a known file comes
+/// first, because that evidence exists only for copies GSeek has already indexed.
 ///
 /// Returns the bucket key and its base lexical score.
 pub(crate) fn name_bucket(name: f64) -> Option<(u8, f64)> {
-    if name >= 3.0 {
-        Some((4, 3.0))
+    let key = if name >= 3.0 {
+        4
     } else if name >= 2.0 {
-        Some((3, 2.0))
+        3
     } else if name >= 0.60 {
         // Every query word is a whole word of the name.
-        Some((2, 0.70))
+        2
     } else if name >= KNOWN_NAME {
         // Every query word starts a word of the name (e.g. while still typing).
-        Some((1, KNOWN_NAME))
+        1
     } else {
-        None
+        return None;
+    };
+    Some((key, bucket_base(key)))
+}
+
+pub(crate) fn bucket_base(key: u8) -> f64 {
+    match key {
+        4 => 3.0,
+        3 => 2.0,
+        2 => 0.70,
+        _ => KNOWN_NAME,
     }
 }
 
@@ -270,6 +292,25 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_recency_band_beats_every_lower_priority_signal() {
+        let now = 1_800_000_000;
+        let older = SearchMetadata {
+            fts_rank: 50.0,
+            modified: now - 8 * 86400,
+            accessed: 0,
+        };
+        let newer = SearchMetadata {
+            fts_rank: 0.0,
+            modified: now - 2 * 86400,
+            accessed: 0,
+        };
+        // Worst case: the older copy also has the best position and phrase match.
+        let old = context("tax", "Tax.pdf", &older, now) + word_quality(0.70);
+        let new = context("tax", "Archive of 2024 taxes tax.pdf", &newer, now);
+        assert!(new > old, "{new} <= {old}");
+    }
+
+    #[test]
     fn copy_suffixes_name_the_same_file() {
         let path = Path::new("/tmp/x");
         for name in [
@@ -290,6 +331,7 @@ mod tests {
         assert!(filename("passport", "Passport 2025.pdf", path) < 1.0);
         assert!(filename("passport 2025", "Passport 2025 (draft).pdf", path) < 1.0);
         assert!(filename("report", "Report (2024).pdf", path) < 1.0);
+        assert!(filename("report", "Report copy 2024.pdf", path) < 1.0);
     }
 
     #[test]

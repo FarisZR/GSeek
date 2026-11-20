@@ -138,10 +138,10 @@ Results are sorted in tiers, like bucket ranking in Meilisearch and Typesense.
 Files are first grouped by how well their name matches the query: exact name,
 the same name with a copy suffix such as `(1)` or `- Copy`, every word, then
 word prefixes. Within a group, GNOME's signals decide: last access or
-modification, then LocalSearch rank and match position. Document text and
-meaning decide where a group appears among content-only matches. They never
-decide which copy of a named file comes first, so the copy you edited or
-opened most recently wins, as in GNOME Files.
+modification, then match position and LocalSearch rank. Document text and
+meaning decide where name matches appear among content-only matches. They never
+reorder name matches, so the copy you edited or opened most recently wins, as in
+GNOME Files.
 There is no blanket preference for Documents or Downloads and no query-history
 tracking. GNOME's global search behavior is the baseline; folder proximity is
 not used.
