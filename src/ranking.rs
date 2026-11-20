@@ -68,9 +68,10 @@ pub(crate) fn context(query: &str, name: &str, metadata: &SearchMetadata, now: i
     // prefix/word-quality difference. Do not shrink recency into a tie-break.
     //
     // GNOME's recency bands are at least 0.01 apart. Everything after them
-    // (filename position ≤ 0.004 spread, LocalSearch rank ≤ 0.001, `fresher`
-    // < 0.001 and `word_quality` ≤ 0.003) sums below one band, so a file in a
-    // newer band always beats an older one with the same name evidence.
+    // (filename position ≤ 0.005 spread, since `name_match` may be 0 for a
+    // normalized match; LocalSearch rank ≤ 0.001; `fresher` < 0.0009; and
+    // `word_quality` ≤ 0.003) sums below one band, so a file in a newer band
+    // always beats an older one with the same name evidence.
     let fts = if metadata.fts_rank.is_finite() {
         metadata.fts_rank.clamp(0.0, 50.0)
     } else {
