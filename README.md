@@ -134,9 +134,14 @@ view automatically. The window is reused when another query arrives from
 Activities. Large result sets use a virtualized list; searches return up to 5,000
 matches and ask you to refine the query if that limit is reached.
 
-Results use filename quality, GNOME LocalSearch rank, document text, meaning,
-and GNOME's last-access/modification recency. Exact filenames and titles take
-priority; matching document text helps distinguish similarly named copies.
+Results are sorted in tiers, like bucket ranking in Meilisearch and Typesense.
+Files are first grouped by how well their name matches the query: exact name,
+the same name with a copy suffix such as `(1)` or `- Copy`, every word, then
+word prefixes. Within a group, GNOME's signals decide: last access or
+modification, then LocalSearch rank and match position. Document text and
+meaning decide where a group appears among content-only matches. They never
+decide which copy of a named file comes first, so the copy you edited or
+opened most recently wins, as in GNOME Files.
 There is no blanket preference for Documents or Downloads and no query-history
 tracking. GNOME's global search behavior is the baseline; folder proximity is
 not used.

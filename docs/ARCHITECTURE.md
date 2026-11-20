@@ -41,8 +41,16 @@ NULL query location. There is no folder-proximity or Documents/Downloads bonus.
 References: GNOME's `nautilus-query.c`, `nautilus-search-hit.c`,
 `nautilus-search-engine-localsearch.c`, and `nautilus-shell-search-provider.c`.
 
-Exact filename and stem classes outrank ordinary matches. Within a class, filename
-position, LocalSearch rank, recency and matching document text distinguish copies.
+Ranking is lexicographic over filename buckets (`ranking::name_bucket`): exact
+name, exact stem ignoring copy suffixes (`(1)`, `(copy)`, `- Copy`, `copy 2`),
+every query word as a whole word, then word prefixes. Files in one bucket share
+the bucket's strongest BM25 and embedding evidence. That evidence positions the
+bucket among content-only results but cannot reorder files inside it, because
+only already-indexed copies have content evidence. A fresh download or a copy in
+a filename-only location would otherwise lose to a stale indexed copy. Inside a
+bucket, GNOME's recency band, phrase-versus-scattered word quality, filename
+position, LocalSearch rank and finally the exact timestamp decide. The order of
+named files is the same with or without a query embedding.
 SQLite BM25 magnitudes are normalized to the strongest matching file for that
 query, rather than replaced by ordinal ranks. A materialized FTS score relation
 selects each file's best text chunk before applying the candidate cap, preventing

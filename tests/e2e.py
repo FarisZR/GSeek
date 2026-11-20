@@ -147,30 +147,32 @@ class EndToEnd(unittest.TestCase):
         refined = self.invoke("GetSubsearchResultSet", GLib.Variant("(asas)", (ids, ["pets", "in", "lease"])), SHELL_IFACE, PROVIDER)[0]
         self.assertTrue(refined)
 
-    def test_01d_gnome_timestamps_and_content_choose_the_intended_copy(self):
+    def test_01d_gnome_timestamps_choose_the_latest_copy_over_indexed_content(self):
+        # Downloads is filename-only, so GSeek has no text or embedding for the
+        # fresh copy. The stale indexed copy's content must not outrank it.
         documents = self.docs / "Research"
         downloads = ROOT / "Downloads"
         documents.mkdir()
         downloads.mkdir(exist_ok=True)
-        wanted = documents / "Research Profile.txt"
-        old = downloads / wanted.name
-        wanted.write_text("Research profile. Observatory permit 7286. The intended reference document.")
-        old.write_text("Unrelated material from an older export.")
+        old = documents / "Research Profile.txt"
+        wanted = downloads / old.name
+        old.write_text("Research profile. Observatory permit 7286. An earlier revision.")
+        wanted.write_text("Research profile. Observatory permit 7286. The current revision.")
         baseline = time.time() - 180 * 86400
-        os.utime(wanted, (baseline, baseline))
+        os.utime(old, (baseline, baseline))
         def indexed(path, timestamp):
             date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
             self.conn.update(f'INSERT DATA {{ GRAPH tracker:FileSystem {{ <{path.as_uri()}> a nfo:FileDataObject ; nie:url {json.dumps(path.as_uri())} ; nfo:fileName {json.dumps(path.name)} ; nfo:fileCreated "{date}"^^xsd:dateTime ; nfo:fileLastModified "{date}"^^xsd:dateTime ; nfo:fileLastAccessed "{date}"^^xsd:dateTime . }} }}', None)
-        indexed(wanted, baseline)
-        indexed(old, time.time())
+        indexed(old, baseline)
+        indexed(wanted, time.time())
         try:
             with closing(sqlite3.connect(ROOT / "data/gseek/index.sqlite3")) as db:
-                wait_for(lambda: db.execute("SELECT state FROM files WHERE uri=?", (wanted.as_uri(),)).fetchone() == ("indexed",))
+                wait_for(lambda: db.execute("SELECT state FROM files WHERE uri=?", (old.as_uri(),)).fetchone() == ("indexed",))
             started = time.monotonic()
             hits = self.search("Research Profile")
             latency = time.monotonic() - started
             self.assertEqual(hits[0]["uri"], wanted.as_uri(), hits)
-            print(json.dumps({"benchmark": "same-name copies, matching text vs recent download", "Success@1": 1, "Success@3": 1, "latency_ms": round(latency * 1000)}), flush=True)
+            print(json.dumps({"benchmark": "same-name copies, indexed stale copy vs recent download", "Success@1": 1, "Success@3": 1, "latency_ms": round(latency * 1000)}), flush=True)
             self.assertLess(latency, 2.0)
             if os.environ.get("GSEEK_TEST_NAUTILUS") == "1":
                 def stock_results():
