@@ -17,6 +17,12 @@
   <content_rating type="oars-1.1"/>
   <screenshots><screenshot type="default"><caption>GSeek setup</caption><image>https://raw.githubusercontent.com/FarisZR/GSeek/main/docs/screenshots/welcome.png</image></screenshot></screenshots>
   <releases>
+    <release version="0.2.4" date="2026-11-20">
+      <description>
+        <p>When you search for a file by name, the copy you edited or opened most recently now comes first, as in GNOME Files. Document text and meaning still help find files, but no longer push an older indexed copy above a newer download.</p>
+        <p>Copies named like “Passport (1)”, “Passport (copy)” or “Passport - Copy” count as the same name. Results for named files are the same whether or not the model is ready.</p>
+      </description>
+    </release>
     <release version="0.2.3" date="2026-10-26">
       <description>
         <p>Find the right copy with improved filename matching, GNOME rank and recency, and document-text relevance. Activities avoids proven identical duplicates while Show All Results retains every copy.</p>
