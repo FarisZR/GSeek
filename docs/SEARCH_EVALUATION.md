@@ -8,21 +8,32 @@ weights or embedding models. No personal files or query history are collected.
 
 The storage benchmark covers five pairs: recently modified Documents copy;
 recently modified Downloads copy; stronger LocalSearch rank; recently accessed
-copy with an old modification date; and a document with matching text versus a
-recent download whose name matches but whose contents do not. The unwanted copy
-gets the stronger synthetic semantic vector, so recency/text evidence must do
-useful work rather than benefit from a convenient embedding fixture.
+copy with an old modification date; and a fresh, not-yet-indexed copy versus an
+old copy with matching text and a stronger embedding. The unwanted copy always
+gets the stronger synthetic semantic vector, so content evidence must not pick
+between copies of a named file.
 
-On this corpus GSeek achieves **Success@1 5/5** and **Success@3 5/5**. The global
-Nautilus score reference (filename match + LocalSearch rank + recency, no query
-location) achieves **Success@1 4/5**. That reference is a formula comparison, not
-a substitute for running GNOME Files.
+On this corpus GSeek achieves **Success@1 5/5** and **Success@3 5/5**, matching
+the global Nautilus score reference (filename match + LocalSearch rank + recency,
+no query location). That reference is a formula comparison, not a substitute for
+running GNOME Files. Earlier releases preferred the indexed copy with matching
+text in the last case. In practice this returned an outdated copy whenever the
+newest one had not been embedded yet.
+
+A separate passport regression (`the_latest_copy_of_a_known_file_wins...`) uses
+four copies: an indexed original, an indexed old scan, a fresh `(1)` download,
+and an unindexed `renewed` copy, plus an unrelated file with a near-perfect
+embedding. The previous ranking put the 400-day-old original first and the fresh
+download fourth, behind the unrelated file. The bucketed ranking puts the fresh
+download first, keeps every named copy above the unrelated file, and gives the
+same order with and without inference.
 
 The installed-app fixture also compares **the actual Nautilus 51.0.1
-SearchProvider2 service** on the same TinySPARQL index for the matching-text vs
-recent-download case. Nautilus's intended document is in the first three but
-not first; GSeek returns it first. The comparison waits for Nautilus's index
-connection to initialize, avoiding a first-activation empty-result artifact.
+SearchProvider2 service** on the same TinySPARQL index for an indexed 180-day-old
+Documents copy versus a fresh, filename-only Downloads copy. GSeek must return
+the fresh copy first, as GNOME's recency does. The comparison waits for
+Nautilus's index connection to initialize, avoiding a first-activation
+empty-result artifact.
 
 Other regressions cover a filename beyond 5,005 weaker candidates, byte-identical
 copies (zero redundant Overview results), changed/unhashed copies that must stay
@@ -58,5 +69,6 @@ Nautilus as an application dependency.
 - [LocalSearch rank and timestamps](https://github.com/GNOME/nautilus/blob/main/src/nautilus-search-engine-localsearch.c)
 - [Overview's global search provider](https://github.com/GNOME/nautilus/blob/main/src/nautilus-shell-search-provider.c)
 
-No location-scoped proximity bonus, speculative version grouping, OCR-quality
+No location-scoped proximity bonus, speculative version grouping (copy suffixes
+are only treated as the same name, not merged), OCR-quality
 estimate, folder-category preference, or activation-history database is used.
