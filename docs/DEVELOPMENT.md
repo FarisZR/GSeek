@@ -57,6 +57,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 cargo test --locked --no-default-features --lib
+xvfb-run -a dbus-run-session -- env GTK_USE_PORTAL=1 cargo test --locked --lib ui::tests::folder_picker -- --ignored --test-threads=1
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 GSEEK_TEST_INFERENCE=true bash tests/flatpak-smoke.sh
 ```

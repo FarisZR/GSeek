@@ -93,8 +93,10 @@ the whole library. Activity shows the current file, completed work, skipped
 formats, and failure details. Preferences cover included and excluded folders,
 file types, hardware, and advanced inference settings.
 
-Preferences save changes immediately. Select multiple folders at once to include
-or exclude them. Exclusions remove queued files and their unreferenced vectors
+Preferences save changes immediately. Use **Ctrl-click** to select several folders,
+or **Shift-click** to select a range, in either **Add Folders…** or **Exclude Folders…**.
+Linked folders are resolved to the host paths used by GNOME’s index.
+Exclusions remove queued files and their unreferenced vectors
 from the index immediately, including saved checkpoints. Activity and Inference
 preferences show the backend Automatic actually selected. Switching backends
 interrupts the previous worker, reports download/startup progress, and preserves
